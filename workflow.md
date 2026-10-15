@@ -157,7 +157,7 @@ Dành cho thành viên kế thừa để hiểu rõ luồng nghiệp vụ và c�
           |                    |                    |                    |
 +---------v---------+  +-------v--------+  +--------v--------+  +--------v--------+
 |   PropertyTile    |  |    TaxTile     |  |    JailTile     |  | Go / GoToJail   |
-| (Đất, Ga, Nước/Điện)| (Thuế cố định/%|  |  (Thăm / Ở tù)  |  |  (Ô di chuyển)  |
+| (Đất, Ga, Nước/Điện)| (Thuế cố định/%)|  |  (Thăm / Ở tù)  |  |  (Ô di chuyển)  |
 +-------------------+  +----------------+  +-----------------+  +-----------------+
 ```
 
