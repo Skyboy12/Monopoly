@@ -5,9 +5,9 @@ import model.Player;
 
 /**
  * Ô đóng thuế (Income Tax, Luxury Tax).
- * <p>
+ *
  * HƯỚNG DẪN TRIỂN KHAI:
- * - Khi người chơi đáp vào ô, khấu trừ taxAmount từ tài khoản người chơi.
+ * Khi người chơi đáp vào ô, khấu trừ taxAmount từ tài khoản người chơi.
  */
 public class TaxTile extends Tile {
     private final int taxAmount;
@@ -18,12 +18,20 @@ public class TaxTile extends Tile {
     }
 
     public int getTaxAmount() {
-        // TODO: Trả về số tiền thuế phải nộp
-        return 0;
+        return this.taxAmount;
     }
 
     @Override
     public void onLand(Player player, GameRoom room) {
-        // TODO: Khấu trừ số tiền thuế (taxAmount) từ ví của người chơi
+        if (player == null) {
+            return;
+        }
+
+        // Khấu trừ số tiền thuế (taxAmount) từ tài khoản người chơi nộp vào ngân hàng
+        boolean success = player.deductMoney(this.taxAmount);
+        if (!success) {
+            // Không đủ tiền đóng thuế -> Tuyên bố phá sản trước ngân hàng (creditor = null)
+            player.declareBankruptcy(null);
+        }
     }
 }

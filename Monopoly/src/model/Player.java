@@ -2,17 +2,20 @@ package model;
 
 import model.item.Inventory;
 import model.tile.PropertyTile;
+import model.tile.RailroadProperty;
+import model.tile.UtilityProperty;
 
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
 
 /**
  * Thực thể người chơi trong ván cờ.
- * <p>
+ *
  * HƯỚNG DẪN TRIỂN KHAI (ĐÓNG GÓI - ENCAPSULATION):
- * - Tất cả các trường dữ liệu (tiền, vị trí, tài sản) phải là private.
- * - Tuyệt đối không cho phép bên ngoài gán trực tiếp: player.money = ...
- * - Mọi biến động tài sản/trạng thái phải thông qua các method nghiệp vụ xác thực.
+ * Tất cả các trường dữ liệu (tiền, vị trí, tài sản) phải là private.
+ * Tuyệt đối không cho phép bên ngoài gán trực tiếp: player.money = ...
+ * Mọi biến động tài sản/trạng thái phải thông qua các method nghiệp vụ xác thực.
  */
 public class Player {
     private final String id;
@@ -46,89 +49,164 @@ public class Player {
     }
 
     public synchronized int getMoney() {
-        // TODO: Trả về số dư tiền hiện tại của người chơi
-        return 0;
+        return this.money;
     }
 
     public synchronized int getPosition() {
-        // TODO: Trả về vị trí hiện tại trên bàn cờ (0 - 39)
-        return 0;
+        return this.position;
     }
 
     public synchronized void setPosition(int position) {
-        // TODO: Cập nhật vị trí mới trên bàn cờ (chuẩn hóa mod 40)
+        // Chuẩn hóa vị trí luôn nằm trong khoảng 0 - 39
+        this.position = ((position % 40) + 40) % 40;
     }
 
     public synchronized PlayerStatus getStatus() {
-        // TODO: Trả về trạng thái người chơi (ACTIVE, IN_JAIL, BANKRUPT)
-        return null;
+        return this.status;
     }
 
     public synchronized void setStatus(PlayerStatus status) {
-        // TODO: Cập nhật trạng thái người chơi
+        this.status = status;
     }
 
     public synchronized boolean isBot() {
-        // TODO: Trả về true nếu người chơi này là bot
-        return false;
+        return this.isBot;
     }
 
     public synchronized void setBot(boolean bot) {
-        // TODO: Đặt trạng thái bot
+        this.isBot = bot;
     }
 
     public synchronized int getTurnsInJail() {
-        // TODO: Trả về số lượt đã thụ án trong tù
-        return 0;
+        return this.turnsInJail;
     }
 
     public synchronized void setTurnsInJail(int turnsInJail) {
-        // TODO: Cập nhật số lượt ở trong tù
+        this.turnsInJail = Math.max(0, turnsInJail);
     }
 
     public synchronized void addMoney(int amount) {
-        // TODO: Cộng thêm tiền vào tài khoản nếu amount > 0
+        if (amount > 0) {
+            this.money += amount;
+        }
     }
 
     public synchronized boolean deductMoney(int amount) {
-        // TODO: Khấu trừ tiền nếu người chơi đủ số dư; trả về true nếu thành công, false nếu không đủ tiền
+        if (amount > 0 && this.money >= amount) {
+            this.money -= amount;
+            return true;
+        }
         return false;
     }
 
     public synchronized boolean pay(int amount, Player receiver) {
-        // TODO: Chuyển tiền an toàn từ người chơi hiện tại sang receiver (chỉ trừ tiền khi chuyển thành công)
+        if (amount <= 0) {
+            return false;
+        }
+        if (this.money >= amount) {
+            this.money -= amount;
+            if (receiver != null) {
+                receiver.addMoney(amount);
+            }
+            return true;
+        }
         return false;
     }
 
     public synchronized void buyProperty(PropertyTile property) {
-        // TODO: Kiểm tra số dư, trừ tiền mua và thêm property vào danh sách sở hữu ownedProperties
+        if (property == null) return;
+        if (property.getOwner() == null && deductMoney(property.getPrice())) {
+            this.ownedProperties.add(property);
+            property.setOwner(this);
+        }
     }
 
     public synchronized void transferProperty(PropertyTile property, Player newOwner) {
-        // TODO: Chuyển quyền sở hữu của một bất động sản sang người chơi mới
+        if (property == null || !this.ownedProperties.contains(property)) {
+            return;
+        }
+        this.ownedProperties.remove(property);
+        if (newOwner != null) {
+            newOwner.getOwnedProperties().add(property);
+            property.setOwner(newOwner);
+        } else {
+            property.setOwner(null); // Trả lại về ngân hàng
+        }
     }
 
     public synchronized void declareBankruptcy(Player creditor) {
-        // TODO: Chuyển trạng thái sang BANKRUPT, bàn giao toàn bộ tài sản cho chủ nợ (nếu có), xóa tiền về 0
+        this.status = PlayerStatus.BANKRUPT;
+
+        // Bàn giao toàn bộ tài sản cho chủ nợ (nếu có) hoặc trả về ngân hàng
+        for (PropertyTile prop : new ArrayList<>(this.ownedProperties)) {
+            if (creditor != null) {
+                creditor.getOwnedProperties().add(prop);
+                prop.setOwner(creditor);
+            } else {
+                prop.setOwner(null);
+            }
+        }
+        this.ownedProperties.clear();
+
+        // Chuyển toàn bộ tiền còn lại cho chủ nợ trước khi xóa về 0
+        if (creditor != null && this.money > 0) {
+            creditor.addMoney(this.money);
+        }
+        this.money = 0;
     }
 
     public synchronized int getRailroadCount() {
-        // TODO: Đếm số lượng nhà ga đang sở hữu
-        return 0;
+        int count = 0;
+        for (PropertyTile prop : ownedProperties) {
+            if (prop instanceof RailroadProperty) {
+                count++;
+            }
+        }
+        return count;
     }
 
     public synchronized int getUtilityCount() {
-        // TODO: Đếm số lượng tiện ích (Điện, Nước) đang sở hữu
-        return 0;
+        int count = 0;
+        for (PropertyTile prop : ownedProperties) {
+            if (prop instanceof UtilityProperty) {
+                count++;
+            }
+        }
+        return count;
     }
 
     public synchronized List<PropertyTile> getOwnedProperties() {
-        // TODO: Trả về danh sách các bất động sản đang sở hữu
-        return null;
+        return this.ownedProperties;
     }
 
     public Inventory getInventory() {
-        // TODO: Trả về túi đồ của người chơi
-        return null;
+        return this.inventory;
+    }
+
+    // --- CÁC HÀM TIỆN ÍCH HỖ TRỢ NGHIỆP VỤ DI CHUYỂN & VÀO TÙ ---
+
+    public synchronized void move(int steps) {
+        int oldPosition = this.position;
+        setPosition(this.position + steps);
+
+        // Thưởng $200 khi vượt qua hoặc dừng đúng ô GO (index 0) nếu không ở tù
+        if (this.position < oldPosition && this.status != PlayerStatus.IN_JAIL) {
+            addMoney(200);
+        }
+    }
+
+    public synchronized void sendToJail(int jailPosition) {
+        setPosition(jailPosition);
+        this.status = PlayerStatus.IN_JAIL;
+        this.turnsInJail = 0;
+    }
+
+    public synchronized boolean payBail() {
+        if (this.status == PlayerStatus.IN_JAIL && deductMoney(50)) {
+            this.status = PlayerStatus.ACTIVE;
+            this.turnsInJail = 0;
+            return true;
+        }
+        return false;
     }
 }

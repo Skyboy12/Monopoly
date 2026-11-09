@@ -6,10 +6,10 @@ import model.PlayerStatus;
 
 /**
  * Ô Vào Tù (Go To Jail).
- * <p>
+ *
  * HƯỚNG DẪN TRIỂN KHAI:
- * - Khi dừng tại đây, di chuyển người chơi thẳng về ô Nhà Tù (index = 10) mà không được nhận thưởng GO.
- * - Chuyển trạng thái người chơi thành PlayerStatus.IN_JAIL.
+ * Khi dừng tại đây, di chuyển người chơi thẳng về ô Nhà Tù (index = 10) mà không được nhận thưởng GO.
+ * Chuyển trạng thái người chơi thành PlayerStatus.IN_JAIL.
  */
 public class GoToJailTile extends Tile {
     public static final int JAIL_INDEX = 10;
@@ -20,8 +20,13 @@ public class GoToJailTile extends Tile {
 
     @Override
     public void onLand(Player player, GameRoom room) {
-        // TODO:
+        if (player == null) {
+            return;
+        }
         // 1. Cập nhật vị trí người chơi về JAIL_INDEX (10)
+        player.setPosition(JAIL_INDEX);
+
         // 2. Đổi trạng thái người chơi sang PlayerStatus.IN_JAIL
+        player.setStatus(PlayerStatus.IN_JAIL);
     }
 }

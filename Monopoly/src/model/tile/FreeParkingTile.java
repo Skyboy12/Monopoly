@@ -5,9 +5,9 @@ import model.Player;
 
 /**
  * Ô Đỗ Xe Miễn Phí (Free Parking).
- * <p>
+ *
  * HƯỚNG DẪN TRIỂN KHAI:
- * - Đây là ô an toàn để nghỉ ngơi, không bị phạt tiền và không xảy ra giao dịch.
+ * Đây là ô an toàn để nghỉ ngơi, không bị phạt tiền và không xảy ra giao dịch.
  */
 public class FreeParkingTile extends Tile {
 
@@ -17,6 +17,6 @@ public class FreeParkingTile extends Tile {
 
     @Override
     public void onLand(Player player, GameRoom room) {
-        // TODO: Xử lý nghỉ ngơi an toàn, không có phí phạt
+        // Nghỉ ngơi an toàn, không phát sinh giao dịch hay trừ tiền
     }
 }

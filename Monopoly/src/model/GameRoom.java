@@ -1,15 +1,16 @@
 package model;
 
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
 
 /**
  * Aggregate Root quản lý trạng thái và vòng đời của ván chơi.
- * <p>
+ *
  * HƯỚNG DẪN TRIỂN KHAI (AGGREGATE ROOT):
- * - Quản lý danh sách người chơi, trạng thái phòng (WAITING, PLAYING, FINISHED).
- * - Quản lý turnId và xoay vòng lượt chơi (nextTurn).
- * - Mọi thao tác đổi lượt chỉ được điều phối từ GameRoom.
+ * Quản lý danh sách người chơi, trạng thái phòng (WAITING, PLAYING, FINISHED).
+ * Quản lý turnId và xoay vòng lượt chơi (nextTurn).
+ * Mọi thao tác đổi lượt chỉ được điều phối từ GameRoom.
  */
 public class GameRoom {
     private final String id;
@@ -47,54 +48,82 @@ public class GameRoom {
     }
 
     public synchronized RoomStatus getStatus() {
-        // TODO: Trả về trạng thái phòng chơi
-        return null;
+        return this.status;
     }
 
     public synchronized void setStatus(RoomStatus status) {
-        // TODO: Cập nhật trạng thái phòng chơi
+        this.status = status;
     }
 
     public Board getBoard() {
-        // TODO: Trả về bàn cờ của phòng
-        return null;
+        return this.board;
     }
 
     public synchronized int getTurnId() {
-        // TODO: Trả về số thứ tự lượt hiện tại (turnId)
-        return 0;
+        return this.turnId;
     }
 
     public synchronized Dice getLastDice() {
-        // TODO: Trả về kết quả xúc xắc vừa gieo trong phòng
-        return null;
+        return this.lastDice;
     }
 
     public synchronized void setLastDice(Dice lastDice) {
-        // TODO: Lưu lại kết quả xúc xắc vừa gieo
+        this.lastDice = lastDice;
     }
 
     public synchronized boolean addPlayer(Player player) {
-        // TODO: Thêm người chơi mới nếu phòng đang WAITING và chưa đạt maxPlayers
+        if (player == null) {
+            return false;
+        }
+        if (this.status == RoomStatus.WAITING && this.players.size() < this.maxPlayers) {
+            // Tránh thêm trùng id người chơi
+            for (Player p : this.players) {
+                if (p.getId().equals(player.getId())) {
+                    return false;
+                }
+            }
+            return this.players.add(player);
+        }
         return false;
     }
 
     public synchronized boolean removePlayer(String playerId) {
-        // TODO: Xóa người chơi khỏi phòng theo ID
-        return false;
+        if (playerId == null || this.players.isEmpty()) {
+            return false;
+        }
+        return this.players.removeIf(p -> p.getId().equals(playerId));
     }
 
     public synchronized Player getCurrentPlayer() {
-        // TODO: Trả về người chơi đang có lượt hành động
-        return null;
+        if (this.players.isEmpty()) {
+            return null;
+        }
+        int index = ((this.currentTurnPlayerIndex % this.players.size()) + this.players.size()) % this.players.size();
+        return this.players.get(index);
     }
 
     public synchronized void nextTurn() {
-        // TODO: Chuyển lượt sang người chơi tiếp theo và tăng turnId
+        if (this.players.isEmpty()) {
+            return;
+        }
+
+        // Tăng turnId
+        this.turnId++;
+
+        // Tìm người chơi tiếp theo còn hoạt động (ACTIVE hoặc IN_JAIL, bỏ qua BANKRUPT)
+        int initialIndex = this.currentTurnPlayerIndex;
+        int size = this.players.size();
+
+        do {
+            this.currentTurnPlayerIndex = (this.currentTurnPlayerIndex + 1) % size;
+            Player nextPlayer = this.players.get(this.currentTurnPlayerIndex);
+            if (nextPlayer.getStatus() != PlayerStatus.BANKRUPT) {
+                break;
+            }
+        } while (this.currentTurnPlayerIndex != initialIndex);
     }
 
     public synchronized List<Player> getPlayers() {
-        // TODO: Trả về danh sách người chơi trong phòng
-        return null;
+        return Collections.unmodifiableList(this.players);
     }
 }
