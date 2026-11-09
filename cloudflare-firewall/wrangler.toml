@@ -1,0 +1,6 @@
+name = "monopoly-edge-firewall"
+main = "src/index.ts"
+compatibility_date = "2024-04-01"
+
+[vars]
+ORIGIN_URL = "http://localhost:8080"

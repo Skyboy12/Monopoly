@@ -355,3 +355,70 @@ public class CloudflareOriginFilter extends OncePerRequestFilter {
 3. Độ trễ (latency overhead) do Cloudflare Worker thêm vào dưới 15ms đối với người dùng trong nước.
 4. Cơ chế Origin Shielding chặn hoàn toàn truy cập trực tiếp vào IP server khi không có secret token `X-Origin-Verify`.
 5. WebSocket kết nối mượt mà, hỗ trợ đầy đủ các bản tin STOMP giữa React client và Spring Boot server.
+
+---
+
+## 8. Hướng dẫn Kết nối & Quản lý Secret An Toàn (Zero Secret Leak)
+
+Tường lửa Edge đã được khởi tạo và deploy trực tiếp lên Cloudflare Edge tại domain:
+`https://monopoly-edge-firewall.skyboy123123-dot.workers.dev`
+
+Nhằm bảo đảm nguyên tắc **an toàn thông tin tuyệt đối**, secret token dùng cho cơ chế Origin Shielding (`X-Origin-Verify`) không được ghi cứng (hard-code) vào code hay tài liệu này. Thay vào đó, toàn bộ khóa bí mật được quản lý qua biến môi trường `.env` và Cloudflare Secrets Store:
+
+### 8.1. Cơ chế Lưu trữ Secret
+- **Local / Server Backend**: Được lưu trữ tại file `.env` ở thư mục gốc của dự án. File này đã được thêm vào `.gitignore` để ngăn chặn rủi ro vô tình commit lên Git.
+- **Mẫu tham khảo an toàn**: Xem file template `.env.example` để biết định dạng các biến cần thiết mà không làm lộ giá trị thực:
+  ```bash
+  CF_WORKER_URL=https://monopoly-edge-firewall.<your-subdomain>.workers.dev
+  ORIGIN_URL=http://localhost:8080
+  ORIGIN_SECRET_KEY=<your_generated_secret_key>
+  APP_SECURITY_ORIGIN_PROTECTION_ENABLED=true
+  APP_SECURITY_ORIGIN_SECRET=<your_generated_secret_key>
+  ```
+- **Cloudflare Edge Worker**: Secret được đồng bộ mã hóa trên hạ tầng Cloudflare bằng lệnh:
+  ```powershell
+  # Upload secret an toàn không lộ trên shell history
+  npx wrangler secret put ORIGIN_SECRET_KEY --cwd cloudflare-firewall
+  ```
+
+### 8.2. Quy trình Kết nối Máy chủ Game với Tường lửa Worker
+Khi đưa máy chủ backend vào hoạt động, thực hiện theo 3 bước:
+
+1. **Bước 1 - Cấu hình Backend Spring Boot đọc Secret từ biến môi trường**:
+   - Khi chạy Spring Boot, nạp biến môi trường từ `.env` vào file cấu hình `application.properties`:
+     ```properties
+     app.security.origin-protection-enabled=${APP_SECURITY_ORIGIN_PROTECTION_ENABLED:true}
+     app.security.origin-secret=${APP_SECURITY_ORIGIN_SECRET}
+     ```
+   - Lớp `CloudflareOriginFilter` sẽ tự động đọc khóa này và từ chối `HTTP 403` với bất kỳ ai cố tình gửi request trực tiếp không có header `X-Origin-Verify` khớp giá trị.
+
+2. **Bước 2 - Thiết lập Cloudflare Tunnel (Khuyên dùng)**:
+   - Thay vì mở cổng mạng nhà (NAT Port Forwarding), cài đặt `cloudflared` để tạo tunnel an toàn:
+     ```bash
+     cloudflared tunnel run <tunnel-name>
+     ```
+   - Cập nhật địa chỉ hostname của Tunnel vào `ORIGIN_URL` của Cloudflare Worker:
+     ```toml
+     # cloudflare-firewall/wrangler.toml
+     [vars]
+     ORIGIN_URL = "https://game-internal.yourdomain.com"
+     ```
+   - Deploy lại Worker: `cd cloudflare-firewall && npx wrangler deploy`.
+
+3. **Bước 3 - Kiểm tra xác thực luồng kết nối**:
+   - **Kiểm tra Edge Firewall đang hoạt động**:
+     ```bash
+     curl -i https://monopoly-edge-firewall.skyboy123123-dot.workers.dev/health
+     # Kết quả: 200 OK {"status":"UP","firewall":"ACTIVE"}
+     ```
+   - **Kiểm tra Drop request rác**:
+     ```bash
+     curl -i https://monopoly-edge-firewall.skyboy123123-dot.workers.dev/.env
+     # Kết quả: 404 Not Found (Bị drop ngay tại Edge)
+     ```
+   - **Kiểm tra chặn bypass IP thật**:
+     ```bash
+     curl -i http://<ORIGIN_IP>:8080/api/rooms
+     # Kết quả: 403 Forbidden (Bị Spring Boot chặn do thiếu X-Origin-Verify)
+     ```
+
