@@ -22,16 +22,16 @@ public class UtilityProperty extends PropertyTile {
             return 0;
         }
 
-        // Lấy số tiện ích chủ sở hữu đang nắm giữ (1 hoặc 2)
         int utilityCount = getOwner().getUtilityCount();
         if (utilityCount <= 0) {
             return 0;
         }
 
-        // Lấy tổng điểm xúc xắc vừa gieo từ phòng chơi (mặc định tối thiểu là 2 nếu chưa có dữ liệu)
-        int diceTotal = (room != null && room.getLastDice() > 0) ? room.getLastDice() : 7;
+        // Gọi getTotal() từ đối tượng Dice, tránh so sánh trực tiếp Dice với int
+        int diceTotal = (room != null && room.getLastDice() != null && room.getLastDice().getTotal() > 0)
+                ? room.getLastDice().getTotal()
+                : 7;
 
-        // Nếu sở hữu cả 2 tiện ích: nhân 10, nếu sở hữu 1 tiện ích: nhân 4
         int multiplier = (utilityCount >= 2) ? 10 : 4;
 
         return diceTotal * multiplier;
