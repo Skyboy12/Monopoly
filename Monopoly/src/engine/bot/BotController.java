@@ -53,6 +53,7 @@ public class BotController implements BotStrategy {
             switch (engine.getCurrentPhase()) {
                 case AWAITING_ROLL -> progressed = handleRoll(engine, player, id, turnId);
                 case AWAITING_DECISION -> progressed = handleDecision(engine, player, id, turnId);
+                case FINISHED -> { return; } // ván đã kết thúc: bot dừng hẳn, không cần endTurn
                 default -> progressed = false; // phase lạ: dừng vòng lặp, dùng fallback bên dưới
             }
 
