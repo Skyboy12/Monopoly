@@ -1,64 +1,107 @@
 package server.service;
 
+import engine.GameEngine;
 import model.GameRoom;
 
+import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
 
 /**
  * Service quản lý các phòng chơi đang hoạt động trên Server (RAM-based State).
- * Tham khảo docs/member-4-backend-platform.md & docs/plan-summary.md:
- * <p>
- * ════════════════════════════════════════════════════════════════════════════════
- * HƯỚNG DẪN TRIỂN KHAI (ROOM CONCURRENCY & SERIALIZATION):
- * ════════════════════════════════════════════════════════════════════════════════
- * - Dùng ConcurrentHashMap<String, GameRoom> để lưu trữ các phòng cờ đang hoạt động.
- * - Concurrency: Mọi thao tác đồng thời phải được serialize độc lập trong từng phòng (GameRoom),
- *   tuyệt đối không dùng synchronized khóa toàn bộ hệ thống server làm nghẽn các phòng khác.
- * - Quản lý vòng đời: createRoom(), getRoomById(), getAllActiveRooms(), removeRoom().
+ * Tích hợp trực tiếp với GameEngine và TurnTimerService của Thành viên 3.
  */
 public class RoomManagerService {
     private final ConcurrentHashMap<String, GameRoom> activeRooms;
+    private final ConcurrentHashMap<String, GameEngine> roomEngines;
+    private final ConcurrentHashMap<String, String> roomHosts;
+    private final TurnTimerService turnTimerService;
 
     public RoomManagerService() {
+        this(new TurnTimerService(Executors.newScheduledThreadPool(4), 30));
+    }
+
+    public RoomManagerService(TurnTimerService turnTimerService) {
         this.activeRooms = new ConcurrentHashMap<>();
+        this.roomEngines = new ConcurrentHashMap<>();
+        this.roomHosts = new ConcurrentHashMap<>();
+        this.turnTimerService = turnTimerService;
     }
 
-    /**
-     * Tạo một phòng chơi mới.
-     *
-     * @param roomId     Mã định danh phòng (duy nhất)
-     * @param roomName   Tên hiển thị của phòng
-     * @param maxPlayers Số người chơi tối đa (từ 2 đến 4 người)
-     * @return GameRoom vừa tạo
-     */
     public GameRoom createRoom(String roomId, String roomName, int maxPlayers) {
-        // TODO: Khởi tạo đối tượng GameRoom mới và lưu vào activeRooms
-        return null;
+        if (roomId == null || roomId.isBlank()) {
+            throw new IllegalArgumentException("roomId không được để trống.");
+        }
+        if (roomName == null || roomName.isBlank()) {
+            throw new IllegalArgumentException("Tên phòng không được để trống.");
+        }
+        int validMaxPlayers = Math.max(2, Math.min(4, maxPlayers));
+
+        GameRoom newRoom = new GameRoom(roomId, roomName.trim(), validMaxPlayers);
+        GameRoom existing = activeRooms.putIfAbsent(roomId, newRoom);
+        if (existing != null) {
+            throw new IllegalStateException("Phòng với mã " + roomId + " đã tồn tại.");
+        }
+
+        // Khởi tạo GameEngine của Thành viên 3 và gắn Listener tự động điều khiển TurnTimerService
+        GameEngine engine = new GameEngine(newRoom);
+        engine.addEventListener(event -> {
+            if (turnTimerService == null) return;
+            GameEngine.EngineEvent.Type type = event.getType();
+            if (type == GameEngine.EngineEvent.Type.GAME_STARTED
+                    || type == GameEngine.EngineEvent.Type.TURN_ENDED
+                    || type == GameEngine.EngineEvent.Type.EXTRA_ROLL_GRANTED
+                    || type == GameEngine.EngineEvent.Type.HUMAN_CONTROL_RECLAIMED) {
+                turnTimerService.startTurnTimer(newRoom.getId(), newRoom.getTurnId(), engine);
+            } else if (type == GameEngine.EngineEvent.Type.GAME_FINISHED) {
+                turnTimerService.cancelTurnTimer(newRoom.getId());
+            }
+        });
+
+        roomEngines.put(roomId, engine);
+        return newRoom;
     }
 
-    /**
-     * Lấy phòng chơi theo mã phòng.
-     */
+    public GameRoom createRoomWithHost(String roomId, String roomName, int maxPlayers, String hostUserId) {
+        GameRoom room = createRoom(roomId, roomName, maxPlayers);
+        if (hostUserId != null && !hostUserId.isBlank()) {
+            roomHosts.put(roomId, hostUserId);
+        }
+        return room;
+    }
+
     public GameRoom getRoom(String roomId) {
-        // TODO: Truy vấn GameRoom từ activeRooms theo roomId
-        return null;
+        return roomId == null ? null : activeRooms.get(roomId);
     }
 
-    /**
-     * Lấy danh sách tất cả các phòng đang chờ hoặc đang chơi.
-     */
+    public GameEngine getEngine(String roomId) {
+        return roomId == null ? null : roomEngines.get(roomId);
+    }
+
+    public String getHostUserId(String roomId) {
+        return roomId == null ? null : roomHosts.get(roomId);
+    }
+
+    public void setHostUserId(String roomId, String hostUserId) {
+        if (roomId != null && hostUserId != null) {
+            roomHosts.put(roomId, hostUserId);
+        }
+    }
+
     public List<GameRoom> getAllRooms() {
-        // TODO: Trả về danh sách toàn bộ các phòng hiện có trong activeRooms
-        return null;
+        return Collections.unmodifiableList(new ArrayList<>(activeRooms.values()));
     }
 
-    /**
-     * Xóa phòng chơi khi ván đấu kết thúc hoặc phòng bị hủy.
-     */
     public boolean deleteRoom(String roomId) {
-        // TODO: Xóa GameRoom khỏi activeRooms
-        return false;
+        if (roomId == null) return false;
+        if (turnTimerService != null) {
+            turnTimerService.cancelTurnTimer(roomId);
+        }
+        roomEngines.remove(roomId);
+        roomHosts.remove(roomId);
+        return activeRooms.remove(roomId) != null;
     }
 }
-
