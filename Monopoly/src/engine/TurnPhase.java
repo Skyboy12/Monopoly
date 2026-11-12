@@ -1,3 +1,5 @@
+package engine;
+
 public enum TurnPhase {
     AWAITING_ROLL,
     RESOLVING_ACTION,
