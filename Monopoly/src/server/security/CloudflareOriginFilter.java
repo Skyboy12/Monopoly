@@ -1,41 +1,47 @@
 package server.security;
 
+import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
+
 /**
  * Bộ lọc bảo mật Origin Shielding (Cloudflare Origin Filter).
- * Tham khảo từ docs/cloudflare-worker-firewall.md &
- * docs/member-4-backend-platform.md:
- * <p>
- * ════════════════════════════════════════════════════════════════════════════════
- * HƯỚNG DẪN TRIỂN KHAI (ORIGIN SHIELDING & ANTI-BYPASS):
- * ════════════════════════════════════════════════════════════════════════════════
- * - Mọi request đi từ Internet bắt buộc phải đi qua Cloudflare Worker (Edge
- * Firewall).
- * - Cloudflare Worker sẽ tự động gắn thêm Header bí mật: "X-Origin-Verify:
- * <SECRET_KEY>".
- * - Khi request tới máy chủ backend, filter này sẽ kiểm tra header
- * "X-Origin-Verify":
- * 1. Nếu header bị thiếu hoặc giá trị không khớp bí mật -> DROP NGAY LẬP TỨC
- * (HTTP 403 Forbidden).
- * Điều này ngăn chặn triệt để hacker dò quét IP mạng nhà để bypass tường lửa
- * Cloudflare.
- * 2. Nếu hợp lệ -> cho phép request đi tiếp vào Controller / WebSocket.
+ * Chặn các request bypass Cloudflare Worker đi thẳng vào IP server.
  */
 public class CloudflareOriginFilter {
     public static final String ORIGIN_HEADER_NAME = "X-Origin-Verify";
     private final String expectedSecretKey;
+    private final boolean protectionEnabled;
 
     public CloudflareOriginFilter(String expectedSecretKey) {
+        this(expectedSecretKey, true);
+    }
+
+    public CloudflareOriginFilter(String expectedSecretKey, boolean protectionEnabled) {
         this.expectedSecretKey = expectedSecretKey;
+        this.protectionEnabled = protectionEnabled;
     }
 
     /**
      * Xác thực header bí mật từ request chuyển tiếp của Cloudflare Worker.
      *
      * @param headerValue Giá trị của header "X-Origin-Verify" trong HTTP Request
-     * @return true nếu khớp khóa bí mật, ngược lại false
+     * @return true nếu khớp khóa bí mật (hoặc đang tắt bảo vệ ở môi trường local), ngược lại false
      */
     public boolean verifyOriginHeader(String headerValue) {
-        // TODO: Kiểm tra headerValue != null và khớp chính xác với expectedSecretKey
-        return false;
+        if (!protectionEnabled) {
+            return true;
+        }
+        if (expectedSecretKey == null || expectedSecretKey.isBlank() || headerValue == null) {
+            return false;
+        }
+        // So sánh constant-time tránh dò khóa bí mật
+        return MessageDigest.isEqual(
+                expectedSecretKey.getBytes(StandardCharsets.UTF_8),
+                headerValue.getBytes(StandardCharsets.UTF_8)
+        );
+    }
+
+    public boolean isProtectionEnabled() {
+        return protectionEnabled;
     }
 }
