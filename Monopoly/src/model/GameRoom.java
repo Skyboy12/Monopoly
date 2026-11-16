@@ -22,6 +22,8 @@ public class GameRoom {
     private int currentTurnPlayerIndex;
     private int turnId;
     private Dice lastDice;
+    private Integer forcedDiceValue;
+    private int rentMultiplier = 1;
 
     public GameRoom(String id, String name, int maxPlayers) {
         this.id = id;
@@ -55,8 +57,24 @@ public class GameRoom {
         this.status = status;
     }
 
-    public Board getBoard() {
+    public synchronized Board getBoard() {
         return this.board;
+    }
+
+    public synchronized Integer getForcedDiceValue() {
+        return forcedDiceValue;
+    }
+
+    public synchronized void setForcedDiceValue(Integer forcedDiceValue) {
+        this.forcedDiceValue = forcedDiceValue;
+    }
+
+    public synchronized int getRentMultiplier() {
+        return rentMultiplier;
+    }
+
+    public synchronized void setRentMultiplier(int rentMultiplier) {
+        this.rentMultiplier = rentMultiplier;
     }
 
     public synchronized int getTurnId() {

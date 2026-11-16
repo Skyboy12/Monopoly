@@ -14,6 +14,7 @@ import model.Player;
 public abstract class Tile {
     private final int index;
     private final String name;
+    private boolean frozen = false;
 
     public Tile(int index, String name) {
         this.index = index;
@@ -26,6 +27,14 @@ public abstract class Tile {
 
     public String getName() {
         return name;
+    }
+
+    public boolean isFrozen() {
+        return frozen;
+    }
+
+    public void setFrozen(boolean frozen) {
+        this.frozen = frozen;
     }
 
     /**

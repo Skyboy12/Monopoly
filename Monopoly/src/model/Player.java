@@ -179,8 +179,18 @@ public class Player {
         return this.ownedProperties;
     }
 
+    private boolean rentShieldActive = false;
+
     public Inventory getInventory() {
         return this.inventory;
+    }
+
+    public synchronized boolean isRentShieldActive() {
+        return rentShieldActive;
+    }
+
+    public synchronized void setRentShieldActive(boolean rentShieldActive) {
+        this.rentShieldActive = rentShieldActive;
     }
 
     // --- CÁC HÀM TIỆN ÍCH HỖ TRỢ NGHIỆP VỤ DI CHUYỂN & VÀO TÙ ---

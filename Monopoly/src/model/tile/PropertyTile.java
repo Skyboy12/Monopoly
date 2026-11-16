@@ -64,13 +64,20 @@ public abstract class PropertyTile extends Tile {
             return;
         }
 
-        // 2. Nếu chủ sở hữu chính là người chơi hiện tại hoặc đất đang thế chấp -> bỏ qua
-        if (this.owner == player || this.mortgaged) {
+        // 2. Nếu chủ sở hữu chính là người chơi hiện tại, đất đang thế chấp, hoặc ô đang đóng băng -> bỏ qua
+        if (this.owner == player || this.mortgaged || isFrozen()) {
             return;
         }
 
-        // 3. Nếu đã có chủ khác -> tính tiền thuê đa hình và yêu cầu player trả tiền cho chủ đất
-        int rent = calculateRent(room);
+        // 2b. Nếu người chơi có Khiên Hộ mệnh -> tiêu thụ khiên và miễn tiền thuê
+        if (player.isRentShieldActive()) {
+            player.setRentShieldActive(false);
+            return;
+        }
+
+        // 3. Nếu đã có chủ khác -> tính tiền thuê đa hình (nhân hệ số sự kiện nếu có) và yêu cầu player trả tiền cho chủ đất
+        int multiplier = (room != null) ? room.getRentMultiplier() : 1;
+        int rent = calculateRent(room) * multiplier;
         if (rent > 0) {
             boolean success = player.pay(rent, this.owner);
             if (!success) {

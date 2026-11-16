@@ -4,7 +4,10 @@ import model.GameRoom;
 import model.Player;
 
 import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.Iterator;
 import java.util.List;
+import java.util.Map;
 
 /**
  * Quản lý vòng đời và thời hạn hiệu lực của các sự kiện đang diễn ra trong phòng cờ.
@@ -21,37 +24,55 @@ import java.util.List;
  */
 public class GameEventManager {
     private final List<GameEvent> activeEvents;
+    private final Map<GameEvent, Integer> remainingTurns;
 
     public GameEventManager() {
         this.activeEvents = new ArrayList<>();
+        this.remainingTurns = new HashMap<>();
     }
 
     /**
      * Kích hoạt một sự kiện mới trong phòng cờ.
      */
     public synchronized void triggerEvent(GameEvent event, GameRoom room) {
-        // TODO:
-        // 1. Thêm event vào danh sách activeEvents
-        // 2. Gọi event.onTrigger(room)
-        // 3. Thông báo sự kiện bắt đầu cho các client trong phòng
+        if (event == null || room == null) {
+            return;
+        }
+        event.onTrigger(room);
+        if (event.getDurationTurns() > 0) {
+            activeEvents.add(event);
+            remainingTurns.put(event, event.getDurationTurns());
+        } else {
+            event.onExpire(room);
+        }
     }
 
     /**
      * Xử lý thời hạn của các sự kiện khi bắt đầu một lượt mới.
      */
     public synchronized void onTurnStart(GameRoom room, Player currentPlayer) {
-        // TODO:
-        // 1. Duyệt qua danh sách activeEvents
-        // 2. Giảm số lượt còn lại của từng sự kiện
-        // 3. Nếu sự kiện hết hạn -> gọi event.onExpire(room) và xóa khỏi activeEvents
+        if (room == null) {
+            return;
+        }
+        Iterator<GameEvent> iterator = activeEvents.iterator();
+        while (iterator.hasNext()) {
+            GameEvent event = iterator.next();
+            int turnsLeft = remainingTurns.getOrDefault(event, 0) - 1;
+            if (turnsLeft <= 0) {
+                event.onExpire(room);
+                remainingTurns.remove(event);
+                iterator.remove();
+            } else {
+                remainingTurns.put(event, turnsLeft);
+            }
+        }
     }
 
     /**
      * Lấy danh sách các sự kiện đang có hiệu lực.
      */
     public synchronized List<GameEvent> getActiveEvents() {
-        // TODO: Trả về danh sách các sự kiện đang diễn ra
-        return null;
+        return new ArrayList<>(activeEvents);
     }
 }
 
