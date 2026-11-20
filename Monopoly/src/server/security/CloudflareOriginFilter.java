@@ -22,6 +22,47 @@ public class CloudflareOriginFilter {
     }
 
     /**
+     * Khởi tạo bộ lọc cho chế độ dev (chạy local, bypass Cloudflare).
+     *
+     * @return CloudflareOriginFilter với protectionEnabled = false
+     */
+    public static CloudflareOriginFilter devMode() {
+        return new CloudflareOriginFilter(null, false);
+    }
+
+    /**
+     * Khởi tạo bộ lọc cho chế độ prod (yêu cầu request đi qua Cloudflare).
+     *
+     * @param expectedSecretKey Khóa bí mật X-Origin-Verify khớp với Cloudflare Worker
+     * @return CloudflareOriginFilter với protectionEnabled = true
+     */
+    public static CloudflareOriginFilter prodMode(String expectedSecretKey) {
+        return new CloudflareOriginFilter(expectedSecretKey, true);
+    }
+
+    /**
+     * Khởi tạo bộ lọc theo môi trường chạy ("dev" hoặc "prod").
+     *
+     * @param mode              Chế độ chạy ("dev"/"local" để bypass Cloudflare, "prod"/"production" để yêu cầu Cloudflare)
+     * @param expectedSecretKey Khóa bí mật X-Origin-Verify dùng trong prod mode
+     * @return CloudflareOriginFilter tương ứng với môi trường
+     * @throws IllegalArgumentException nếu mode null hoặc không hợp lệ
+     */
+    public static CloudflareOriginFilter forEnvironment(String mode, String expectedSecretKey) {
+        if (mode == null || mode.isBlank()) {
+            throw new IllegalArgumentException("Environment mode must not be null or blank");
+        }
+        String normalized = mode.trim().toLowerCase();
+        if ("dev".equals(normalized) || "development".equals(normalized) || "local".equals(normalized)) {
+            return devMode();
+        }
+        if ("prod".equals(normalized) || "production".equals(normalized)) {
+            return prodMode(expectedSecretKey);
+        }
+        throw new IllegalArgumentException("Unsupported environment mode: " + mode);
+    }
+
+    /**
      * Xác thực header bí mật từ request chuyển tiếp của Cloudflare Worker.
      *
      * @param headerValue Giá trị của header "X-Origin-Verify" trong HTTP Request
