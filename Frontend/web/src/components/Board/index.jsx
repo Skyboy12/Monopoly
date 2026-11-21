@@ -1,4 +1,5 @@
-import { Crown, Dices, Zap } from 'lucide-react'
+import { Dices, Zap } from 'lucide-react'
+import Logo from '../Logo'
 
 // eslint-disable-next-line react-refresh/only-export-components
 export const tileData = [
@@ -81,7 +82,7 @@ export default function Board({ players, onRoll, dice, rolled, onFinish, rolling
           })}
 
           <div className="board-center">
-            <div className="center-brand"><Crown size={15}/><span>MONOPOLY <b>PARTY</b></span></div>
+            <div className="center-brand"><Logo small /></div>
             <div className="event-banner"><div className="event-icon"><Zap size={17} fill="currentColor"/></div><div><small>Sự kiện đang bật</small><strong>Bão may mắn</strong></div><b className="event-x">×2</b></div>
             <div className="dice-zone">
               <div className={`dice-cube ${rolling?'dice-rolling':''}`}><span>{dice[0]}</span></div>

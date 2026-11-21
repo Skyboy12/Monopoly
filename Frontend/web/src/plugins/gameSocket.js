@@ -2,8 +2,18 @@ import { Client } from '@stomp/stompjs'
 
 export function createGameSocket({ roomId, userId, onMessage, onError }) {
   const configuredUrl = import.meta.env.VITE_WS_URL
-  const wsUrl = configuredUrl || `${location.protocol === 'https:' ? 'wss:' : 'ws:'}//${location.hostname}:8080/ws`
+  const wsUrl = configuredUrl || `${location.protocol === 'https:' ? 'wss:' : 'ws:'}//${location.host}/ws`
   const token = localStorage.getItem('accessToken')
+
+  if (!token) {
+    return {
+      sendRoll: () => false,
+      sendBuy: () => false,
+      sendItem: () => false,
+      sendEndTurn: () => false,
+      disconnect: () => {},
+    }
+  }
 
   const client = new Client({
     brokerURL: wsUrl,
