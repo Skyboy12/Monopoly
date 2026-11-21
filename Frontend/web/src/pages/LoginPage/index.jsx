@@ -2,6 +2,7 @@ import { useState } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
 import { UserRound, LockKeyhole, Eye, EyeOff, AlertCircle, ArrowRight } from 'lucide-react'
 import Logo from '../../components/Logo'
+import api, { getApiError } from '../../plugins/api'
 
 export default function LoginPage() {
   const navigate = useNavigate()
@@ -10,13 +11,27 @@ export default function LoginPage() {
   const [showPassword, setShowPassword] = useState(false)
   const [errorMsg, setErrorMsg] = useState('')
 
-  const handleLogin = () => {
+  const handleLogin = async () => {
     if (!name.trim() || !password) {
       setErrorMsg('Vui lòng nhập đầy đủ tên đăng nhập và mật khẩu.')
       return
     }
     setErrorMsg('')
-    navigate('/')
+    try {
+      let response
+      try {
+        response = await api.post('/api/v1/auth/login', { username: name.trim(), password })
+      } catch {
+        response = await api.post('/api/auth/login', { username: name.trim(), password })
+      }
+      const payload = response.data?.payload ? JSON.parse(response.data.payload) : response.data
+      const token = payload.accessToken || payload.access_token
+      if (token) localStorage.setItem('accessToken', token)
+      localStorage.setItem('currentUser', JSON.stringify(payload.user || payload))
+      navigate('/')
+    } catch (error) {
+      setErrorMsg(getApiError(error, 'Tên đăng nhập hoặc mật khẩu không đúng.'))
+    }
   }
 
   return (

@@ -1,11 +1,17 @@
-import { useEffect, useState } from 'react'
-import { useNavigate } from 'react-router-dom'
+import { useEffect, useRef, useState } from 'react'
+import { useLocation, useNavigate } from 'react-router-dom'
 import { Dices, MapPin, Volume2, LogOut, Sparkles, Timer, Users, ScrollText, Home, Zap, Landmark, ArrowRightCircle, Backpack, Magnet, ShieldCheck, Rocket, Trophy, BookOpen, Gamepad2 } from 'lucide-react'
 import Board, { tileData } from '../../components/Board'
 import { playersSeed, powerUpsSeed } from '../../data/gameData'
+import api from '../../plugins/api'
+import { createGameSocket } from '../../plugins/gameSocket'
 
 export default function GameRoomPage() {
   const navigate = useNavigate()
+  const location = useLocation()
+  const roomId = location.state?.roomId || 'MNP-2408'
+  const currentUser = JSON.parse(localStorage.getItem('currentUser') || '{}')
+  const playerId = currentUser.userId || currentUser.id || 'demo-player'
   const [players, setPlayers] = useState(playersSeed)
   const [dice, setDice] = useState([3, 5])
   const [rolled, setRolled] = useState(false)
@@ -14,15 +20,47 @@ export default function GameRoomPage() {
   const [turnIndex, setTurnIndex] = useState(0)
   const [rolling, setRolling] = useState(false)
   const [toast, setToast] = useState('')
+  const [turnId, setTurnId] = useState(location.state?.turnId || 0)
+  const socketRef = useRef(null)
 
   useEffect(() => {
     const timer = setInterval(() => setTurnTime((time) => time > 0 ? time - 1 : 60), 1000)
     return () => clearInterval(timer)
   }, [])
 
+  useEffect(() => {
+    const socket = createGameSocket({
+      roomId,
+      userId: playerId,
+      onMessage: (message) => {
+        if (message.payload) {
+          try {
+            const payload = typeof message.payload === 'string' ? JSON.parse(message.payload) : message.payload
+            if (payload.turnId !== undefined) setTurnId(payload.turnId)
+            if (payload.newTurnId !== undefined) setTurnId(payload.newTurnId)
+            if (payload.dice1 !== undefined && payload.dice2 !== undefined) {
+              setDice([payload.dice1, payload.dice2])
+              setRolled(true)
+              setRolling(false)
+            }
+            if (payload.error || payload.message) setToast(payload.message || payload.error)
+          } catch {
+            setToast('Máy chủ đã gửi dữ liệu không hợp lệ.')
+          }
+        }
+        setLog(message.type || 'Máy chủ đã cập nhật trạng thái phòng.')
+      },
+      onError: setToast,
+    })
+    socketRef.current = socket
+    return () => socket.disconnect()
+  }, [roomId, playerId])
+
   const roll = () => {
     if (rolled || rolling) return
     setRolling(true)
+    const sent = socketRef.current?.sendRoll(turnId)
+    if (sent) return
     window.setTimeout(() => {
       const first = Math.floor(Math.random() * 6) + 1
       const second = Math.floor(Math.random() * 6) + 1
@@ -37,11 +75,27 @@ export default function GameRoomPage() {
   }
 
   const endTurn = () => {
+    if (socketRef.current?.sendEndTurn(turnId)) return
     const next = (turnIndex + 1) % players.length
     setTurnIndex(next)
     setRolled(false)
     setTurnTime(49)
     setLog(`Đến lượt ${players[next].name} gieo xúc xắc!`)
+  }
+
+  const buyProperty = () => {
+    if (socketRef.current?.sendBuy(turnId, current.position)) return
+    setToast('Chưa kết nối máy chủ: hành động mua đất đang ở chế độ mock.')
+  }
+
+  const leaveRoom = async () => {
+    try { await api.post(`/api/v1/rooms/${roomId}/leave`) } catch { /* Demo mode: vẫn cho rời phòng khi backend offline */ }
+    navigate('/')
+  }
+
+  const activatePowerUp = (itemId, message) => {
+    if (socketRef.current?.sendItem(turnId, itemId)) setToast(message)
+    else showToast(message)
   }
 
   const showToast = (message) => {
@@ -57,7 +111,7 @@ export default function GameRoomPage() {
       <header className="party-topbar">
         <div className="party-brand"><div className="party-logo"><Dices size={20}/></div><div><div>MONOPOLY <b>PARTY</b></div><small>Tabletop Edition</small></div></div>
         <nav className="party-nav"><button className="active"><Gamepad2 size={14}/>Sảnh chơi</button><button><Trophy size={14}/>Bảng xếp hạng</button><button><BookOpen size={14}/>Hướng dẫn</button></nav>
-        <div className="party-room-tools"><div className="room-pill"><b><i/>MNP-2408</b><span>•</span><span><MapPin size={13}/>Khu phố Hạ Long</span><em>32ms</em></div><button className="icon-button"><Volume2 size={16}/></button><button className="leave-button" onClick={() => navigate('/')}><LogOut size={15}/><span>Rời phòng</span></button></div>
+        <div className="party-room-tools"><div className="room-pill"><b><i/>MNP-2408</b><span>•</span><span><MapPin size={13}/>Khu phố Hạ Long</span><em>32ms</em></div><button className="icon-button"><Volume2 size={16}/></button><button className="leave-button" onClick={leaveRoom}><LogOut size={15}/><span>Rời phòng</span></button></div>
       </header>
 
       <div className="party-layout">
@@ -82,7 +136,7 @@ export default function GameRoomPage() {
         <aside className="right-panel">
           <section className="glass-card action-card-panel"><div className="card-title"><span><Zap size={14}/>Hành động</span><b className="phase-badge">{rolled?'Action Phase':'Awaiting Roll'}</b></div>
             <button className="side-action roll-action" onClick={roll} disabled={rolled||rolling}><div><Dices size={20}/></div><span><strong>Gieo xúc xắc</strong><small>{rolling?'Đang tung...':'Nhấn để tung cặp xúc xắc'}</small></span></button>
-            <button className={`side-action buy-action ${rolled?'enabled':''}`} disabled={!rolled}><div><Landmark size={20}/></div><span><strong>Mua bất động sản</strong><small>{rolled?'Có thể mua tại ô hiện tại':'Chưa thể mua ở ô này'}</small></span></button>
+            <button className={`side-action buy-action ${rolled?'enabled':''}`} disabled={!rolled} onClick={buyProperty}><div><Landmark size={20}/></div><span><strong>Mua bất động sản</strong><small>{rolled?'Có thể mua tại ô hiện tại':'Chưa thể mua ở ô này'}</small></span></button>
             {rolled&&<button className="end-turn" onClick={endTurn}><ArrowRightCircle size={16}/>Kết thúc lượt</button>}
           </section>
 
@@ -90,7 +144,7 @@ export default function GameRoomPage() {
             {powerUpsSeed.map((item) => {
               const Icon = item.id === 'magnet' ? Magnet : item.id === 'shield' ? ShieldCheck : Rocket
               const message = item.id === 'magnet' ? 'Đá đổi: Kéo đối thủ gần nhất về ô hiện tại!' : item.id === 'shield' ? 'Bảo vệ: Miễn nhiễm tiền thuê trong 1 lượt!' : 'Tên lửa: Tiến thẳng thêm 5 ô!'
-              return <button className={`power-${item.tone}`} onClick={() => showToast(message)} key={item.id}><i>{item.count}</i><Icon size={20}/><span>{item.name}</span></button>
+              return <button className={`power-${item.tone}`} onClick={() => activatePowerUp(item.id, message)} key={item.id}><i>{item.count}</i><Icon size={20}/><span>{item.name}</span></button>
             })}
           </div></section>
         </aside>

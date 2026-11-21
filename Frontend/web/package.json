@@ -10,6 +10,8 @@
     "preview": "vite preview"
   },
   "dependencies": {
+    "@stomp/stompjs": "^7.5.0",
+    "axios": "^1.21.1",
     "lucide-react": "^1.77.0",
     "react": "^19.2.7",
     "react-dom": "^19.2.7",

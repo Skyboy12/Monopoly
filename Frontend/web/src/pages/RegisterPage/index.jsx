@@ -2,6 +2,7 @@ import { useState } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
 import { UserRound, CircleUserRound, LockKeyhole, Eye, EyeOff, AlertCircle, ArrowRight } from 'lucide-react'
 import Logo from '../../components/Logo'
+import api, { getApiError } from '../../plugins/api'
 
 export default function RegisterPage() {
   const navigate = useNavigate()
@@ -11,13 +12,27 @@ export default function RegisterPage() {
   const [showPassword, setShowPassword] = useState(false)
   const [errorMsg, setErrorMsg] = useState('')
 
-  const handleRegister = () => {
+  const handleRegister = async () => {
     if (!displayName.trim() || !name.trim() || password.length < 6) {
       setErrorMsg('Vui lòng nhập tên hiển thị, tên đăng nhập và mật khẩu tối thiểu 6 ký tự.')
       return
     }
     setErrorMsg('')
-    navigate('/login')
+    try {
+      let response
+      try {
+        response = await api.post('/api/v1/auth/register', { username: name.trim(), password, displayName: displayName.trim() })
+      } catch {
+        response = await api.post('/api/auth/register', { username: name.trim(), password, displayName: displayName.trim() })
+      }
+      const payload = response.data?.payload ? JSON.parse(response.data.payload) : response.data
+      const token = payload.accessToken || payload.access_token
+      if (token) localStorage.setItem('accessToken', token)
+      localStorage.setItem('currentUser', JSON.stringify(payload.user || payload))
+      navigate('/')
+    } catch (error) {
+      setErrorMsg(getApiError(error, 'Không thể tạo tài khoản.'))
+    }
   }
 
   return (
