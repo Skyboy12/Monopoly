@@ -8,7 +8,7 @@ import java.util.Collections;
 import java.util.List;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Executors;
-import java.util.concurrent.ScheduledExecutorService;
+import java.util.function.BiConsumer;
 
 /**
  * Service quản lý các phòng chơi đang hoạt động trên Server (RAM-based State).
@@ -19,9 +19,14 @@ public class RoomManagerService {
     private final ConcurrentHashMap<String, GameEngine> roomEngines;
     private final ConcurrentHashMap<String, String> roomHosts;
     private final TurnTimerService turnTimerService;
+    private volatile BiConsumer<GameRoom, GameEngine.EngineEvent> globalEngineEventListener;
 
     public RoomManagerService() {
-        this(new TurnTimerService(Executors.newScheduledThreadPool(4), 30));
+        this(new TurnTimerService(Executors.newScheduledThreadPool(4, r -> {
+            Thread t = new Thread(r, "monopoly-turn-timer");
+            t.setDaemon(true);
+            return t;
+        }), 30));
     }
 
     public RoomManagerService(TurnTimerService turnTimerService) {
@@ -29,6 +34,10 @@ public class RoomManagerService {
         this.roomEngines = new ConcurrentHashMap<>();
         this.roomHosts = new ConcurrentHashMap<>();
         this.turnTimerService = turnTimerService;
+    }
+
+    public void setGlobalEngineEventListener(BiConsumer<GameRoom, GameEngine.EngineEvent> listener) {
+        this.globalEngineEventListener = listener;
     }
 
     public GameRoom createRoom(String roomId, String roomName, int maxPlayers) {
@@ -49,15 +58,23 @@ public class RoomManagerService {
         // Khởi tạo GameEngine của Thành viên 3 và gắn Listener tự động điều khiển TurnTimerService
         GameEngine engine = new GameEngine(newRoom);
         engine.addEventListener(event -> {
-            if (turnTimerService == null) return;
-            GameEngine.EngineEvent.Type type = event.getType();
-            if (type == GameEngine.EngineEvent.Type.GAME_STARTED
-                    || type == GameEngine.EngineEvent.Type.TURN_ENDED
-                    || type == GameEngine.EngineEvent.Type.EXTRA_ROLL_GRANTED
-                    || type == GameEngine.EngineEvent.Type.HUMAN_CONTROL_RECLAIMED) {
-                turnTimerService.startTurnTimer(newRoom.getId(), newRoom.getTurnId(), engine);
-            } else if (type == GameEngine.EngineEvent.Type.GAME_FINISHED) {
-                turnTimerService.cancelTurnTimer(newRoom.getId());
+            if (turnTimerService != null) {
+                GameEngine.EngineEvent.Type type = event.getType();
+                if (type == GameEngine.EngineEvent.Type.GAME_STARTED
+                        || type == GameEngine.EngineEvent.Type.TURN_ENDED
+                        || type == GameEngine.EngineEvent.Type.EXTRA_ROLL_GRANTED
+                        || type == GameEngine.EngineEvent.Type.HUMAN_CONTROL_RECLAIMED) {
+                    turnTimerService.startTurnTimer(newRoom.getId(), newRoom.getTurnId(), engine);
+                } else if (type == GameEngine.EngineEvent.Type.GAME_FINISHED) {
+                    turnTimerService.cancelTurnTimer(newRoom.getId());
+                }
+            }
+            BiConsumer<GameRoom, GameEngine.EngineEvent> listener = this.globalEngineEventListener;
+            if (listener != null) {
+                try {
+                    listener.accept(newRoom, event);
+                } catch (RuntimeException ignored) {
+                }
             }
         });
 
@@ -103,5 +120,11 @@ public class RoomManagerService {
         roomEngines.remove(roomId);
         roomHosts.remove(roomId);
         return activeRooms.remove(roomId) != null;
+    }
+
+    public void shutdown() {
+        if (turnTimerService != null) {
+            turnTimerService.shutdown();
+        }
     }
 }

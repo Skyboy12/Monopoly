@@ -1,0 +1,5 @@
+@import url('https://fonts.googleapis.com/css2?family=Be+Vietnam+Pro:wght@400;500;600;700;800&family=Plus+Jakarta+Sans:wght@500;600;700;800&family=Space+Grotesk:wght@600;700&display=swap');
+
+:root{font-family:'Be Vietnam Pro','Plus Jakarta Sans',system-ui,sans-serif;color:#172033;background:#f4f6fb;font-synthesis:none;text-rendering:optimizeLegibility;-webkit-font-smoothing:antialiased;--ink:#172033;--muted:#7c8499;--line:#e7e9f0;--rose:#ed4d62;--navy:#0b1120}
+*{box-sizing:border-box}
+body{margin:0;min-width:320px;min-height:100vh}button,input,select{font:inherit}button{cursor:pointer}button:disabled{cursor:not-allowed}#root{min-height:100vh}.tabular,.player-row>strong,.turn-time,.party-room-tools,.room-pill,.dice-total{font-variant-numeric:tabular-nums}

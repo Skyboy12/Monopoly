@@ -1,6 +1,8 @@
 package model.item;
 
 import java.util.ArrayList;
+import java.util.Collections;
+import java.util.Iterator;
 import java.util.List;
 
 /**
@@ -31,8 +33,11 @@ public class Inventory {
      * @return true nếu thêm thành công, false nếu túi đồ đã đầy
      */
     public synchronized boolean addItem(Item item) {
-        // TODO: Kiểm tra nếu items.size() < maxCapacity thì thêm item vào list và trả về true; ngược lại false
-        return false;
+        if (item == null || items.size() >= maxCapacity) {
+            return false;
+        }
+        items.add(item);
+        return true;
     }
 
     /**
@@ -42,7 +47,17 @@ public class Inventory {
      * @return Vật phẩm đã bị xóa hoặc null nếu không tìm thấy
      */
     public synchronized Item removeItem(String itemId) {
-        // TODO: Tìm item có id khớp với itemId, xóa khỏi list và trả về item đó; nếu không có trả về null
+        if (itemId == null) {
+            return null;
+        }
+        Iterator<Item> iterator = items.iterator();
+        while (iterator.hasNext()) {
+            Item item = iterator.next();
+            if (itemId.equals(item.getId())) {
+                iterator.remove();
+                return item;
+            }
+        }
         return null;
     }
 
@@ -53,8 +68,7 @@ public class Inventory {
      * @return true nếu có trong túi, false nếu không
      */
     public synchronized boolean hasItem(String itemId) {
-        // TODO: Duyệt danh sách items kiểm tra xem có item nào có id khớp với itemId không
-        return false;
+        return getItemById(itemId) != null;
     }
 
     /**
@@ -64,7 +78,14 @@ public class Inventory {
      * @return Item nếu tìm thấy, null nếu không có
      */
     public synchronized Item getItemById(String itemId) {
-        // TODO: Tìm và trả về item theo ID mà không xóa khỏi túi đồ
+        if (itemId == null) {
+            return null;
+        }
+        for (Item item : items) {
+            if (itemId.equals(item.getId())) {
+                return item;
+            }
+        }
         return null;
     }
 
@@ -72,12 +93,10 @@ public class Inventory {
      * Lấy toàn bộ danh sách vật phẩm hiện có trong túi đồ.
      */
     public synchronized List<Item> getItems() {
-        // TODO: Trả về bản sao hoặc Collections.unmodifiableList(items)
-        return null;
+        return Collections.unmodifiableList(new ArrayList<>(items));
     }
 
     public int getMaxCapacity() {
-        // TODO: Trả về sức chứa tối đa của túi đồ
-        return 0;
+        return maxCapacity;
     }
 }

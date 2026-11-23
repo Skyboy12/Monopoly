@@ -43,6 +43,13 @@ public class RoomRestController {
      * API 2: POST /api/v1/rooms - Tạo phòng chơi mới và tự động thêm Host vào phòng.
      */
     public GameMessage createRoom(String roomName, int maxPlayers, String hostUserId) {
+        return createRoom(roomName, maxPlayers, hostUserId, hostUserId);
+    }
+
+    /**
+     * API 2 (Overload): Tạo phòng chơi mới với tên hiển thị của Host.
+     */
+    public GameMessage createRoom(String roomName, int maxPlayers, String hostUserId, String hostDisplayName) {
         if (hostUserId == null || hostUserId.isBlank()) {
             return errorMessage(null, null, 0, "UNAUTHORIZED", "Thiếu thông tin người tạo phòng.");
         }
@@ -56,7 +63,10 @@ public class RoomRestController {
         String roomId = "room-" + UUID.randomUUID().toString().substring(0, 8);
         GameRoom room = roomManagerService.createRoomWithHost(roomId, roomName.trim(), maxPlayers, hostUserId);
 
-        Player hostPlayer = new Player(hostUserId, hostUserId, DEFAULT_INITIAL_MONEY);
+        String displayName = (hostDisplayName == null || hostDisplayName.isBlank())
+                ? hostUserId
+                : hostDisplayName.trim();
+        Player hostPlayer = new Player(hostUserId, displayName, DEFAULT_INITIAL_MONEY);
         room.addPlayer(hostPlayer);
 
         return new GameMessage(
@@ -191,14 +201,23 @@ public class RoomRestController {
         if (hostId == null && !room.getPlayers().isEmpty()) {
             hostId = room.getPlayers().get(0).getId();
         }
+        String safeHostId = hostId == null ? "" : hostId;
+        String hostName = safeHostId;
+        for (Player player : room.getPlayers()) {
+            if (player.getId().equals(safeHostId)) {
+                hostName = player.getName();
+                break;
+            }
+        }
         return String.format(
-                "{\"roomId\":\"%s\",\"roomName\":\"%s\",\"status\":\"%s\",\"currentPlayers\":%d,\"maxPlayers\":%d,\"hostId\":\"%s\",\"turnId\":%d}",
+                "{\"roomId\":\"%s\",\"roomName\":\"%s\",\"status\":\"%s\",\"currentPlayers\":%d,\"maxPlayers\":%d,\"hostId\":\"%s\",\"hostName\":\"%s\",\"turnId\":%d}",
                 escape(room.getId()),
                 escape(room.getName()),
                 room.getStatus().name(),
                 room.getPlayers().size(),
                 room.getMaxPlayers(),
-                escape(hostId == null ? "" : hostId),
+                escape(safeHostId),
+                escape(hostName),
                 room.getTurnId()
         );
     }
@@ -209,6 +228,27 @@ public class RoomRestController {
     }
 
     private static String escape(String s) {
-        return s == null ? "" : s.replace("\\", "\\\\").replace("\"", "\\\"");
+        if (s == null) return "";
+        StringBuilder sb = new StringBuilder(s.length() + 8);
+        for (int i = 0; i < s.length(); i++) {
+            char c = s.charAt(i);
+            switch (c) {
+                case '\\' -> sb.append("\\\\");
+                case '"' -> sb.append("\\\"");
+                case '\b' -> sb.append("\\b");
+                case '\f' -> sb.append("\\f");
+                case '\n' -> sb.append("\\n");
+                case '\r' -> sb.append("\\r");
+                case '\t' -> sb.append("\\t");
+                default -> {
+                    if (c < 0x20) {
+                        sb.append(String.format("\\u%04x", (int) c));
+                    } else {
+                        sb.append(c);
+                    }
+                }
+            }
+        }
+        return sb.toString();
     }
 }

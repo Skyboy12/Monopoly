@@ -70,6 +70,10 @@ public class TurnTimerService {
 
             String playerId = player.getId();
 
+            if (scheduler.isShutdown()) {
+                return;
+            }
+
             // 1. Hủy timer cũ của phòng.
             cancelTurnTimer(roomId);
 
@@ -114,6 +118,19 @@ public class TurnTimerService {
             // Hủy timer cũ.
             future.cancel(true);
         }
+    }
+
+    /**
+     * Hủy toàn bộ bộ đếm đang chạy và dừng scheduler khi tắt server.
+     */
+    public synchronized void shutdown() {
+        for (ScheduledFuture<?> future : roomTimers.values()) {
+            if (future != null) {
+                future.cancel(true);
+            }
+        }
+        roomTimers.clear();
+        scheduler.shutdownNow();
     }
 
     /**

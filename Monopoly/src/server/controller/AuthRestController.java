@@ -48,7 +48,8 @@ public class AuthRestController {
 
         String payload = String.format(
                 "{\"userId\":\"%s\",\"username\":\"%s\",\"displayName\":\"%s\",\"ratingPoints\":%d,\"accessToken\":\"%s\"}",
-                saved.getId(), saved.getUsername(), saved.getDisplayName(), saved.getRatingPoints(), token
+                escape(saved.getId()), escape(saved.getUsername()), escape(saved.getDisplayName()),
+                saved.getRatingPoints(), escape(token)
         );
         return new GameMessage("AUTH_REGISTERED", saved.getId(), null, 0, payload);
     }
@@ -69,7 +70,8 @@ public class AuthRestController {
         String token = jwtTokenProvider.generateToken(user.getId(), user.getUsername());
         String payload = String.format(
                 "{\"userId\":\"%s\",\"username\":\"%s\",\"displayName\":\"%s\",\"ratingPoints\":%d,\"accessToken\":\"%s\"}",
-                user.getId(), user.getUsername(), user.getDisplayName(), user.getRatingPoints(), token
+                escape(user.getId()), escape(user.getUsername()), escape(user.getDisplayName()),
+                user.getRatingPoints(), escape(token)
         );
         return new GameMessage("AUTH_LOGGED_IN", user.getId(), null, 0, payload);
     }
@@ -90,13 +92,39 @@ public class AuthRestController {
         UserAccount user = userOpt.get();
         String payload = String.format(
                 "{\"userId\":\"%s\",\"username\":\"%s\",\"displayName\":\"%s\",\"ratingPoints\":%d}",
-                user.getId(), user.getUsername(), user.getDisplayName(), user.getRatingPoints()
+                escape(user.getId()), escape(user.getUsername()), escape(user.getDisplayName()),
+                user.getRatingPoints()
         );
         return new GameMessage("USER_PROFILE", user.getId(), null, 0, payload);
     }
 
     private GameMessage error(String code, String message) {
-        String payload = String.format("{\"error\":\"%s\",\"message\":\"%s\"}", code, message);
+        String payload = String.format("{\"error\":\"%s\",\"message\":\"%s\"}", escape(code), escape(message));
         return new GameMessage("ERROR", null, null, 0, payload);
+    }
+
+    private static String escape(String s) {
+        if (s == null) return "";
+        StringBuilder sb = new StringBuilder(s.length() + 8);
+        for (int i = 0; i < s.length(); i++) {
+            char c = s.charAt(i);
+            switch (c) {
+                case '\\' -> sb.append("\\\\");
+                case '"' -> sb.append("\\\"");
+                case '\b' -> sb.append("\\b");
+                case '\f' -> sb.append("\\f");
+                case '\n' -> sb.append("\\n");
+                case '\r' -> sb.append("\\r");
+                case '\t' -> sb.append("\\t");
+                default -> {
+                    if (c < 0x20) {
+                        sb.append(String.format("\\u%04x", (int) c));
+                    } else {
+                        sb.append(c);
+                    }
+                }
+            }
+        }
+        return sb.toString();
     }
 }
