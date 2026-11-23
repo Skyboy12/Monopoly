@@ -46,6 +46,7 @@ public class GameWebSocketController {
             return buildError(roomId, playerId, turnId, result.getCode(), result.getMessage());
         }
 
+        String phaseName = engine.getCurrentPhase().name();
         GameRoom room = engine.getRoom();
         synchronized (room) {
             Dice dice = room.getLastDice();
@@ -58,7 +59,7 @@ public class GameWebSocketController {
 
             String payload = String.format(
                     "{\"code\":\"%s\",\"dice1\":%d,\"dice2\":%d,\"total\":%d,\"newPosition\":%d,\"playerMoney\":%d,\"phase\":\"%s\",\"currentTurnId\":%d}",
-                    result.getCode(), d1, d2, total, pos, money, engine.getCurrentPhase().name(), room.getTurnId()
+                    result.getCode(), d1, d2, total, pos, money, phaseName, room.getTurnId()
             );
             return new GameMessage("DICE_ROLLED", playerId, room.getId(), room.getTurnId(), payload);
         }
@@ -81,12 +82,19 @@ public class GameWebSocketController {
                             "TILE_MISMATCH", "Vị trí ô đất yêu cầu mua không khớp vị trí hiện tại của người chơi trên Server.");
                 }
             }
+        }
 
-            ActionResult result = engine.buyProperty(roomId, playerId, turnId, "BUY-" + UUID.randomUUID());
-            if (!result.isSuccess()) {
-                return buildError(roomId, playerId, turnId, result.getCode(), result.getMessage());
+        ActionResult result = engine.buyProperty(roomId, playerId, turnId, "BUY-" + UUID.randomUUID());
+        if (!result.isSuccess()) {
+            return buildError(roomId, playerId, turnId, result.getCode(), result.getMessage());
+        }
+
+        String phaseName = engine.getCurrentPhase().name();
+        synchronized (room) {
+            Player currentPlayer = room.getCurrentPlayer();
+            if (currentPlayer == null) {
+                return buildError(roomId, playerId, turnId, "PLAYER_NOT_FOUND", "Không tìm thấy người chơi hiện tại.");
             }
-
             Tile tile = room.getBoard().getTile(currentPlayer.getPosition());
             PropertyTile property = (PropertyTile) tile;
 
@@ -97,7 +105,7 @@ public class GameWebSocketController {
                     property.getPrice(),
                     escape(playerId),
                     currentPlayer.getMoney(),
-                    engine.getCurrentPhase().name()
+                    phaseName
             );
             return new GameMessage("PROPERTY_BOUGHT", playerId, room.getId(), room.getTurnId(), payload);
         }
@@ -128,6 +136,7 @@ public class GameWebSocketController {
             return buildError(roomId, playerId, turnId, "INVALID_ITEM_ID", "itemId không được để trống.");
         }
 
+        TurnPhase enginePhase = engine.getCurrentPhase();
         GameRoom room = engine.getRoom();
         synchronized (room) {
             if (!room.getId().equals(roomId)) {
@@ -154,7 +163,7 @@ public class GameWebSocketController {
             }
 
             Item item = inventory.getItemById(itemId);
-            if (!isPhaseCompatible(engine.getCurrentPhase(), item.getTriggerPhase())) {
+            if (!isPhaseCompatible(enginePhase, item.getTriggerPhase())) {
                 return buildError(roomId, playerId, turnId, "INVALID_ITEM_PHASE", "Không thể dùng vật phẩm ở giai đoạn này.");
             }
 
@@ -175,7 +184,7 @@ public class GameWebSocketController {
                     escape(item.getId()),
                     escape(item.getName()),
                     escape(playerId),
-                    engine.getCurrentPhase().name()
+                    enginePhase.name()
             );
             return new GameMessage("ITEM_USED", playerId, room.getId(), room.getTurnId(), payload);
         }
@@ -194,6 +203,7 @@ public class GameWebSocketController {
             return buildError(roomId, playerId, turnId, result.getCode(), result.getMessage());
         }
 
+        String phaseName = engine.getCurrentPhase().name();
         GameRoom room = engine.getRoom();
         synchronized (room) {
             Player nextPlayer = room.getCurrentPlayer();
@@ -204,7 +214,7 @@ public class GameWebSocketController {
                     escape(playerId),
                     escape(nextPlayerId),
                     room.getTurnId(),
-                    engine.getCurrentPhase().name(),
+                    phaseName,
                     room.getStatus().name()
             );
             return new GameMessage("TURN_CHANGED", playerId, room.getId(), room.getTurnId(), payload);
@@ -219,6 +229,7 @@ public class GameWebSocketController {
             return buildError(roomId, playerId, turnId, "ENGINE_NOT_FOUND", "Không tìm thấy GameEngine.");
         }
 
+        TurnPhase enginePhase = engine.getCurrentPhase();
         GameRoom room = engine.getRoom();
         synchronized (room) {
             if (!room.getId().equals(roomId)) {
@@ -238,7 +249,7 @@ public class GameWebSocketController {
             if (currentPlayer.getStatus() != PlayerStatus.IN_JAIL) {
                 return buildError(roomId, playerId, turnId, "NOT_IN_JAIL", "Người chơi không đang ở trong tù.");
             }
-            if (engine.getCurrentPhase() != TurnPhase.AWAITING_ROLL) {
+            if (enginePhase != TurnPhase.AWAITING_ROLL) {
                 return buildError(roomId, playerId, turnId, "INVALID_PHASE", "Chỉ có thể nộp bảo lãnh trước khi gieo xúc xắc.");
             }
 
@@ -253,7 +264,7 @@ public class GameWebSocketController {
                     currentPlayer.getMoney(),
                     currentPlayer.getStatus().name(),
                     room.getTurnId(),
-                    engine.getCurrentPhase().name()
+                    enginePhase.name()
             );
             return new GameMessage("BAIL_PAID", playerId, room.getId(), room.getTurnId(), payload);
         }
@@ -270,9 +281,21 @@ public class GameWebSocketController {
      * Tạo bản chụp trạng thái phòng chơi kèm thông tin hostId đầy đủ cho client.
      */
     public GameMessage buildSnapshotMessage(GameEngine engine, String hostId) {
+        return buildSnapshotMessage(engine, hostId, 0L, List.of());
+    }
+
+    /**
+     * Tạo bản chụp trạng thái phòng chơi đầy đủ kèm deadline lượt chơi từ Server và nhật ký ván đấu gần nhất.
+     */
+    public GameMessage buildSnapshotMessage(
+            GameEngine engine,
+            String hostId,
+            long turnDeadlineEpochMs,
+            List<String> recentLogs) {
         if (engine == null) {
             return buildError(null, "SERVER", 0, "ENGINE_NOT_FOUND", "Không tìm thấy GameEngine.");
         }
+        String phaseName = engine.getCurrentPhase().name();
         GameRoom room = engine.getRoom();
         synchronized (room) {
             String resolvedHostId = hostId;
@@ -350,26 +373,48 @@ public class GameWebSocketController {
             }
             tilesJson.append("]");
 
+            StringBuilder logsJson = new StringBuilder("[");
+            if (recentLogs != null) {
+                boolean first = true;
+                for (String entry : recentLogs) {
+                    if (entry == null) {
+                        continue;
+                    }
+                    if (!first) {
+                        logsJson.append(",");
+                    }
+                    first = false;
+                    logsJson.append("\"").append(escape(entry)).append("\"");
+                }
+            }
+            logsJson.append("]");
+
             Dice lastDice = room.getLastDice();
             String lastDiceJson = (lastDice == null)
                     ? "null"
                     : String.format("{\"dice1\":%d,\"dice2\":%d,\"total\":%d}",
                     lastDice.getDice1(), lastDice.getDice2(), lastDice.getTotal());
 
+            long serverTimeEpochMs = System.currentTimeMillis();
+            long safeDeadline = Math.max(0L, turnDeadlineEpochMs);
+
             Player current = room.getCurrentPlayer();
             String payload = String.format(
-                    "{\"roomId\":\"%s\",\"roomName\":\"%s\",\"hostId\":\"%s\",\"roomStatus\":\"%s\",\"maxPlayers\":%d,\"turnId\":%d,\"phase\":\"%s\",\"currentPlayerId\":\"%s\",\"lastDice\":%s,\"players\":%s,\"tiles\":%s}",
+                    "{\"roomId\":\"%s\",\"roomName\":\"%s\",\"hostId\":\"%s\",\"roomStatus\":\"%s\",\"maxPlayers\":%d,\"turnId\":%d,\"phase\":\"%s\",\"currentPlayerId\":\"%s\",\"turnDeadlineEpochMs\":%d,\"serverTimeEpochMs\":%d,\"lastDice\":%s,\"players\":%s,\"tiles\":%s,\"logs\":%s}",
                     escape(room.getId()),
                     escape(room.getName()),
                     escape(resolvedHostId == null ? "" : resolvedHostId),
                     room.getStatus().name(),
                     room.getMaxPlayers(),
                     room.getTurnId(),
-                    engine.getCurrentPhase().name(),
+                    phaseName,
                     escape(current != null ? current.getId() : ""),
+                    safeDeadline,
+                    serverTimeEpochMs,
                     lastDiceJson,
                     playersJson,
-                    tilesJson
+                    tilesJson,
+                    logsJson
             );
             return new GameMessage("GAME_STATE_SNAPSHOT", "SERVER", room.getId(), room.getTurnId(), payload);
         }

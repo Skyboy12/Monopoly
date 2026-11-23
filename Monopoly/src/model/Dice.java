@@ -20,6 +20,21 @@ public class Dice {
         this.dice2 = random.nextInt(6) + 1;
     }
 
+    /**
+     * Thiết lập giá trị xúc xắc cố định (dùng cho MagicDiceItem) sao cho tổng bằng total
+     * và mỗi viên nằm trong khoảng [1, 6].
+     */
+    public void setForcedTotal(int total) {
+        if (total < 2 || total > 12) {
+            roll();
+            return;
+        }
+        int minD1 = Math.max(1, total - 6);
+        int maxD1 = Math.min(6, total - 1);
+        this.dice1 = minD1 + random.nextInt(maxD1 - minD1 + 1);
+        this.dice2 = total - this.dice1;
+    }
+
     public int getDice1() {
         return this.dice1;
     }

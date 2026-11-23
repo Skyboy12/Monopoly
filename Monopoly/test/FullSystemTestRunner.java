@@ -3,7 +3,6 @@ package test;
 import engine.GameEngine;
 import engine.GameEngine.ActionResult;
 import engine.GameEngine.EngineEvent;
-import engine.TurnPhase;
 import engine.bot.BotController;
 import model.Board;
 import model.Dice;
@@ -61,13 +60,10 @@ import java.security.SecureRandom;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Base64;
-import java.util.Collections;
-import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
-import java.util.UUID;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executors;
@@ -140,6 +136,8 @@ public class FullSystemTestRunner {
                 this::testStompUnauthorizedConnect);
         runTest("Suite D", "Real WS + STOMP 1.2 multiplayer, anti-cheat, roll, buy & end-turn sync",
                 this::testStompMultiplayerAndAntiCheat);
+        runTest("Suite D", "Snapshot timer/logs sync, ROOM_JOINED/ROOM_LEFT & Timeout/Bot broadcasts",
+                this::testStompRoomLeaveTimeoutAndBotBroadcasts);
 
         printSummaryAndExit();
     }
@@ -1005,6 +1003,12 @@ public class FullSystemTestRunner {
                 Map<String, Object> snap2 = awaitGameSnapshot(c2, topicDest, 4000);
                 assertEquals("PLAYING", snap1.get("roomStatus"), "c1 snapshot PLAYING");
                 assertEquals("PLAYING", snap2.get("roomStatus"), "c2 snapshot PLAYING");
+                assertTrue(((Number) snap1.get("turnDeadlineEpochMs")).longValue() > 0L,
+                        "Snapshot turnDeadlineEpochMs > 0");
+                assertTrue(((Number) snap1.get("serverTimeEpochMs")).longValue() > 0L,
+                        "Snapshot serverTimeEpochMs > 0");
+                assertTrue(snap1.get("logs") instanceof List<?> && !((List<?>) snap1.get("logs")).isEmpty(),
+                        "Snapshot logs list present and non-empty");
 
                 String activeId = (String) snap1.get("currentPlayerId");
                 int turnId = ((Number) snap1.get("turnId")).intValue();
@@ -1150,6 +1154,123 @@ public class FullSystemTestRunner {
 
                 assertTrue(testedBuyProperty, "Successfully verified TILE_MISMATCH and PROPERTY_BOUGHT over STOMP");
                 assertTrue(testedEndTurn, "Successfully verified end-turn advancement and snapshot sync");
+                assertTrue(((Number) snap1.get("turnDeadlineEpochMs")).longValue() > 0L,
+                        "Post-turn snapshot turnDeadlineEpochMs > 0");
+                assertTrue(((Number) snap1.get("serverTimeEpochMs")).longValue() > 0L,
+                        "Post-turn snapshot serverTimeEpochMs > 0");
+                @SuppressWarnings("unchecked")
+                List<Object> postLogs = (List<Object>) snap1.get("logs");
+                assertTrue(postLogs != null && postLogs.size() >= 3,
+                        "Snapshot logs accumulated across room actions");
+            }
+        }
+    }
+
+    private void testStompRoomLeaveTimeoutAndBotBroadcasts() throws Exception {
+        try (GatewayHarness gw = startGatewayWithTurnTimeout("dev", null, 1)) {
+            int port = gw.port;
+
+            AuthUser p1 = registerViaRest(port, "botP1", "pass1234", "An Host");
+            AuthUser p2 = registerViaRest(port, "botP2", "pass1234", "Bình Guest");
+            AuthUser p3 = registerViaRest(port, "botP3", "pass1234", "Chi Visitor");
+            Map<String, String> h1 = Map.of("Authorization", "Bearer " + p1.token);
+            Map<String, String> h2 = Map.of("Authorization", "Bearer " + p2.token);
+            Map<String, String> h3 = Map.of("Authorization", "Bearer " + p3.token);
+
+            // Part 1: Verify ROOM_JOINED / ROOM_LEFT broadcasts + REST snapshot timer/logs
+            HttpResponse createLobby = RawHttpClient.request("127.0.0.1", port, "POST", "/api/v1/rooms", h1,
+                    "{\"roomName\":\"Timer & Bot Arena\",\"maxPlayers\":3}");
+            assertEquals(201, createLobby.statusCode, "Create room -> 201");
+            String roomId = (String) MiniJson.parseObject((String) MiniJson.parseObject(createLobby.body).get("payload")).get("roomId");
+            String topicDest = "/topic/room/" + roomId;
+
+            try (StompWsClient c1 = new StompWsClient("127.0.0.1", port, "/ws", null)) {
+                assertEquals("CONNECTED", c1.connectAndExpectFrame("Bearer " + p1.token, 4000).command, "c1 CONNECTED");
+                c1.subscribe("sub-room-1", topicDest);
+                Map<String, Object> initSnap = awaitGameSnapshot(c1, topicDest, 4000);
+                assertEquals(0L, ((Number) initSnap.get("turnDeadlineEpochMs")).longValue(),
+                        "WAITING room turnDeadlineEpochMs == 0");
+                assertTrue(((Number) initSnap.get("serverTimeEpochMs")).longValue() > 0L,
+                        "WAITING room serverTimeEpochMs > 0");
+
+                // p2 & p3 join -> ROOM_JOINED broadcast
+                assertEquals(200, RawHttpClient.request("127.0.0.1", port, "POST", "/api/v1/rooms/" + roomId + "/join", h2, "{}").statusCode,
+                        "p2 joins");
+                Map<String, Object> join2Msg = awaitTopicMessageOfType(c1, topicDest, "ROOM_JOINED", 4000);
+                assertEquals(p2.userId, join2Msg.get("senderId"), "ROOM_JOINED senderId matches p2");
+                awaitGameSnapshot(c1, topicDest, 4000);
+
+                assertEquals(200, RawHttpClient.request("127.0.0.1", port, "POST", "/api/v1/rooms/" + roomId + "/join", h3, "{}").statusCode,
+                        "p3 joins");
+                awaitTopicMessageOfType(c1, topicDest, "ROOM_JOINED", 4000);
+                awaitGameSnapshot(c1, topicDest, 4000);
+
+                // p3 leaves -> ROOM_LEFT broadcast + snapshot log includes display name
+                assertEquals(200, RawHttpClient.request("127.0.0.1", port, "POST", "/api/v1/rooms/" + roomId + "/leave", h3, "{}").statusCode,
+                        "p3 leaves");
+                Map<String, Object> leftMsg = awaitTopicMessageOfType(c1, topicDest, "ROOM_LEFT", 4000);
+                assertEquals(p3.userId, leftMsg.get("senderId"), "ROOM_LEFT senderId matches p3");
+                Map<String, Object> afterLeaveSnap = awaitGameSnapshot(c1, topicDest, 4000);
+                @SuppressWarnings("unchecked")
+                List<Object> leaveLogs = (List<Object>) afterLeaveSnap.get("logs");
+                assertTrue(leaveLogs.stream().anyMatch(l -> String.valueOf(l).contains("Chi Visitor đã rời phòng.")),
+                        "Snapshot logs record player display name on leave");
+
+                // Start game -> TurnTimerService 1s countdown starts -> Timeout & Bot takeover broadcasts
+                assertEquals(200, RawHttpClient.request("127.0.0.1", port, "POST", "/api/v1/rooms/" + roomId + "/start", h1, "{}").statusCode,
+                        "p1 starts");
+                awaitTopicMessageOfType(c1, topicDest, "GAME_STARTED", 4000);
+                awaitGameSnapshot(c1, topicDest, 4000);
+
+                // Verify REST snapshot restores turnDeadlineEpochMs > 0, serverTimeEpochMs > 0, and logs
+                HttpResponse restSnapRes = RawHttpClient.request("127.0.0.1", port, "GET", "/api/v1/rooms/" + roomId + "/snapshot", h1, null);
+                assertEquals(200, restSnapRes.statusCode, "GET snapshot -> 200");
+                Map<String, Object> restSnap = MiniJson.parseObject((String) MiniJson.parseObject(restSnapRes.body).get("payload"));
+                assertTrue(((Number) restSnap.get("turnDeadlineEpochMs")).longValue() > 0L,
+                        "REST snapshot turnDeadlineEpochMs > 0");
+                assertTrue(((Number) restSnap.get("serverTimeEpochMs")).longValue() > 0L,
+                        "REST snapshot serverTimeEpochMs > 0");
+                assertTrue(restSnap.get("logs") instanceof List<?> && !((List<?>) restSnap.get("logs")).isEmpty(),
+                        "REST snapshot contains server logs");
+
+                // Wait for 1s timeout + Bot turn broadcasts
+                Map<String, Object> timeoutMsg = awaitTopicMessageOfType(c1, topicDest, "TURN_TIMED_OUT", 5000);
+                Map<String, Object> timeoutPayload = MiniJson.parseObject((String) timeoutMsg.get("payload"));
+                assertEquals("TIMEOUT", timeoutPayload.get("reason"), "TURN_TIMED_OUT reason TIMEOUT");
+
+                Map<String, Object> takeoverMsg = awaitTopicMessageOfType(c1, topicDest, "BOT_TAKEOVER", 5000);
+                Map<String, Object> takeoverPayload = MiniJson.parseObject((String) takeoverMsg.get("payload"));
+                assertNotNull(takeoverPayload.get("playerId"), "BOT_TAKEOVER has playerId");
+
+                Map<String, Object> botDiceMsg = awaitTopicMessageOfType(c1, topicDest, "DICE_ROLLED", 5000);
+                Map<String, Object> botDicePayload = MiniJson.parseObject((String) botDiceMsg.get("payload"));
+                assertEquals(Boolean.TRUE, botDicePayload.get("bot"), "Bot DICE_ROLLED has bot=true");
+                assertEquals("BOT_ROLL", botDicePayload.get("code"), "Bot DICE_ROLLED has code=BOT_ROLL");
+
+                Map<String, Object> turnChangedMsg = awaitTopicMessageOfType(c1, topicDest, "TURN_CHANGED", 5000);
+                assertNotNull(turnChangedMsg.get("payload"), "Bot TURN_CHANGED received");
+
+                // Verify latest snapshot after bot turn has fresh deadline & [Bot] log
+                Map<String, Object> postBotSnap = awaitTopicMessageOfType(c1, topicDest, "GAME_STATE_SNAPSHOT", 5000);
+                Map<String, Object> postBotPayload = MiniJson.parseObject((String) postBotSnap.get("payload"));
+                // Drain TURN_TIMED_OUT / EXTRA_ROLL snapshots if consumed before final TURN_ENDED snapshot
+                for (int i = 0; i < 6; i++) {
+                    @SuppressWarnings("unchecked")
+                    List<Object> curLogs = (List<Object>) postBotPayload.get("logs");
+                    if (curLogs != null && curLogs.stream().anyMatch(l -> String.valueOf(l).contains("[Bot]"))) {
+                        break;
+                    }
+                    Map<String, Object> nextSnap = awaitTopicMessageOfType(c1, topicDest, "GAME_STATE_SNAPSHOT", 3000);
+                    postBotPayload = MiniJson.parseObject((String) nextSnap.get("payload"));
+                }
+                assertTrue(((Number) postBotPayload.get("turnDeadlineEpochMs")).longValue() > 0L,
+                        "Post-bot snapshot turnDeadlineEpochMs > 0");
+                @SuppressWarnings("unchecked")
+                List<Object> botLogs = (List<Object>) postBotPayload.get("logs");
+                assertTrue(botLogs.stream().anyMatch(l -> String.valueOf(l).contains("hết giờ lượt #")),
+                        "Snapshot logs contain timeout entry");
+                assertTrue(botLogs.stream().anyMatch(l -> String.valueOf(l).contains("[Bot]")),
+                        "Snapshot logs contain [Bot] entry");
             }
         }
     }
@@ -1159,6 +1280,10 @@ public class FullSystemTestRunner {
     // =========================================================================
 
     private GatewayHarness startGateway(String mode, String originSecret) throws Exception {
+        return startGatewayWithTurnTimeout(mode, originSecret, 30);
+    }
+
+    private GatewayHarness startGatewayWithTurnTimeout(String mode, String originSecret, int turnTimeoutSeconds) throws Exception {
         GatewayConfig config = new GatewayConfig(
                 0,
                 mode,
@@ -1170,7 +1295,15 @@ public class FullSystemTestRunner {
         JwtTokenProvider jwtProvider = new JwtTokenProvider(config.getJwtSecret(), config.getJwtValidityMs());
         PasswordEncoderUtil passwordEncoder = new PasswordEncoderUtil();
         UserRepository userRepository = new UserRepository();
-        RoomManagerService roomManager = new RoomManagerService();
+        TurnTimerService timerService = new TurnTimerService(
+                Executors.newScheduledThreadPool(2, r -> {
+                    Thread t = new Thread(r, "test-turn-timer");
+                    t.setDaemon(true);
+                    return t;
+                }),
+                turnTimeoutSeconds
+        );
+        RoomManagerService roomManager = new RoomManagerService(timerService);
         AuthRestController authController = new AuthRestController(userRepository, passwordEncoder, jwtProvider);
         RoomRestController roomController = new RoomRestController(roomManager);
         GameWebSocketController wsController = new GameWebSocketController();

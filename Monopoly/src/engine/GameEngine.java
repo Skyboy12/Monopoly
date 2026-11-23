@@ -300,7 +300,13 @@ public class GameEngine {
             String actionId) {
 
         Dice dice = new Dice();
-        dice.roll();
+        Integer forcedDice = room.getForcedDiceValue();
+        if (forcedDice != null && forcedDice >= 2 && forcedDice <= 12) {
+            dice.setForcedTotal(forcedDice);
+            room.setForcedDiceValue(null);
+        } else {
+            dice.roll();
+        }
 
         room.setLastDice(dice);
 
@@ -353,6 +359,15 @@ public class GameEngine {
         if (tile != null) {
             try {
                 tile.onLand(player, room);
+
+                if (tile.isFrozen()) {
+                    player.move(2);
+                    Tile slidTile = room.getBoard().getTile(player.getPosition());
+                    if (slidTile != null) {
+                        slidTile.onLand(player, room);
+                        tile = slidTile;
+                    }
+                }
 
                 emit(
                         EngineEvent.Type.TILE_RESOLVED,
@@ -685,6 +700,7 @@ public class GameEngine {
         currentPhase = TurnPhase.AWAITING_ROLL;
 
         Player nextPlayer = room.getCurrentPlayer();
+        room.getEventManager().onTurnStart(room, nextPlayer);
 
         emit(
                 EngineEvent.Type.TURN_ENDED,

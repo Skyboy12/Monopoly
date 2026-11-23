@@ -43,6 +43,28 @@ function readStoredUser() {
   }
 }
 
+function getRoomLogsKey(roomId) {
+  return `roomLogs:${roomId}`
+}
+
+function readStoredLogs(roomId) {
+  if (!roomId) return []
+  try {
+    const raw = sessionStorage.getItem(getRoomLogsKey(roomId))
+    if (!raw) return []
+    const parsed = JSON.parse(raw)
+    return Array.isArray(parsed)
+      ? parsed.filter((entry) => typeof entry === 'string' && entry.trim())
+      : []
+  } catch {
+    return []
+  }
+}
+
+function stripLogTimestamp(line) {
+  return String(line || '').replace(/^\[\d{2}:\d{2}:\d{2}\]\s*/, '').trim()
+}
+
 function decoratePlayers(players = []) {
   return players.map((player, index) => ({
     ...player,
@@ -131,7 +153,7 @@ export default function GameRoomPage() {
   const [rolling, setRolling] = useState(false)
   const [leaving, setLeaving] = useState(false)
   const [wsConnected, setWsConnected] = useState(false)
-  const [logs, setLogs] = useState([])
+  const [logs, setLogs] = useState(() => readStoredLogs(resolvedRoomId))
   const [toast, setToast] = useState('')
   const [turnDeadline, setTurnDeadline] = useState(() => Date.now() + 30000)
   const [nowMs, setNowMs] = useState(() => Date.now())
@@ -165,13 +187,65 @@ export default function GameRoomPage() {
 
   const appendLog = useCallback((entry) => {
     if (!entry) return
+    const normalized = stripLogTimestamp(entry)
+    if (!normalized) return
     const timeLabel = new Date().toLocaleTimeString('vi-VN', {
       hour: '2-digit',
       minute: '2-digit',
       second: '2-digit',
     })
-    setLogs((prev) => [`[${timeLabel}] ${entry}`, ...prev].slice(0, 20))
+    setLogs((prev) => {
+      if (prev.slice(0, 5).some((item) => stripLogTimestamp(item) === normalized)) {
+        return prev
+      }
+      return [`[${timeLabel}] ${normalized}`, ...prev].slice(0, 30)
+    })
   }, [])
+
+  const hydrateServerLogs = useCallback((serverLogs) => {
+    if (!Array.isArray(serverLogs) || serverLogs.length === 0) return
+    const cleaned = serverLogs
+      .filter((entry) => typeof entry === 'string' && entry.trim())
+      .map((entry) => entry.trim())
+    if (cleaned.length === 0) return
+
+    setLogs((prev) => {
+      const existing = new Set(prev.map(stripLogTimestamp))
+      const missing = [...cleaned]
+        .reverse()
+        .filter((entry) => {
+          const normalized = stripLogTimestamp(entry)
+          if (!normalized || existing.has(normalized)) return false
+          existing.add(normalized)
+          return true
+        })
+      if (missing.length === 0) return prev
+      return [...missing, ...prev].slice(0, 30)
+    })
+  }, [])
+
+  const syncTurnDeadline = useCallback((payload, fallbackTo30s = false) => {
+    if (typeof payload?.turnDeadlineEpochMs === 'number' && payload.turnDeadlineEpochMs > 0) {
+      const skew = payload.serverTimeEpochMs ? Date.now() - payload.serverTimeEpochMs : 0
+      setTurnDeadline(payload.turnDeadlineEpochMs + skew)
+      setNowMs(Date.now())
+      return true
+    }
+    if (fallbackTo30s) {
+      setTurnDeadline(Date.now() + 30000)
+      setNowMs(Date.now())
+    }
+    return false
+  }, [])
+
+  useEffect(() => {
+    if (!resolvedRoomId) return
+    try {
+      sessionStorage.setItem(getRoomLogsKey(resolvedRoomId), JSON.stringify(logs.slice(0, 30)))
+    } catch {
+      // Ignore storage quota errors
+    }
+  }, [resolvedRoomId, logs])
 
   useEffect(() => {
     return () => {
@@ -184,7 +258,7 @@ export default function GameRoomPage() {
   useEffect(() => {
     const interval = window.setInterval(() => {
       setNowMs(Date.now())
-    }, 1000)
+    }, 250)
     return () => window.clearInterval(interval)
   }, [])
 
@@ -255,8 +329,13 @@ export default function GameRoomPage() {
       playersRef.current = nextPlayers
 
       setGameState(nextState)
-      if (turnChanged || (nextRoomStatus === 'PLAYING' && prev.roomStatus !== 'PLAYING')) {
+      const syncedFromServer = syncTurnDeadline(payload, false)
+      if (!syncedFromServer && (turnChanged || (nextRoomStatus === 'PLAYING' && prev.roomStatus !== 'PLAYING'))) {
         setTurnDeadline(Date.now() + 30000)
+        setNowMs(Date.now())
+      }
+      if (Array.isArray(payload.logs)) {
+        hydrateServerLogs(payload.logs)
       }
       setRolling(false)
       setLoadingSnapshot(false)
@@ -265,7 +344,7 @@ export default function GameRoomPage() {
         goToFinish(nextState)
       }
     },
-    [goToFinish],
+    [goToFinish, hydrateServerLogs, syncTurnDeadline],
   )
 
   const fetchSnapshot = useCallback(async () => {
@@ -363,13 +442,36 @@ export default function GameRoomPage() {
               turnId: payload.turnId ?? message.turnId ?? prev.turnId,
               phase: 'AWAITING_ROLL',
             }))
-            setTurnDeadline(Date.now() + 30000)
+            syncTurnDeadline(payload, true)
             appendLog('Ván đấu đã bắt đầu!')
+            break
+          }
+          case 'TURN_TIMED_OUT': {
+            setRolling(false)
+            const actor = payload.playerName || resolveActorName(payload.playerId || message.senderId)
+            const turnNum = payload.turnId ?? message.turnId ?? gameStateRef.current.turnId
+            setGameState((prev) => ({
+              ...prev,
+              phase: 'TIMEOUT',
+            }))
+            appendLog(`${actor} hết giờ lượt #${turnNum} — Bot đang tiếp quản!`)
+            showToast(`${actor} hết giờ — Bot đang tiếp quản lượt!`)
+            break
+          }
+          case 'BOT_TAKEOVER': {
+            setRolling(false)
+            const actor = payload.playerName || resolveActorName(payload.playerId || message.senderId)
+            setGameState((prev) => ({
+              ...prev,
+              phase: 'TIMEOUT',
+            }))
+            appendLog(`[Bot] Tiếp quản lượt của ${actor}.`)
             break
           }
           case 'DICE_ROLLED': {
             setRolling(false)
-            const actor = resolveActorName(message.senderId)
+            const actor = payload.playerName || resolveActorName(payload.playerId || message.senderId)
+            const prefix = payload.bot === true ? '[Bot] ' : ''
             const diceObj = {
               dice1: payload.dice1,
               dice2: payload.dice2,
@@ -386,29 +488,32 @@ export default function GameRoomPage() {
                 ? ' (Gieo đôi 3 lần -> Vào tù!)'
                 : ` -> Ô #${payload.newPosition}`
             appendLog(
-              `${actor} gieo được ${payload.dice1} + ${payload.dice2} = ${payload.total}${note}`,
+              `${prefix}${actor} gieo được ${payload.dice1} + ${payload.dice2} = ${payload.total}${note}`,
             )
             break
           }
           case 'PROPERTY_BOUGHT': {
-            const actor = resolveActorName(payload.ownerId || message.senderId)
-            appendLog(`${actor} đã mua ${payload.tileName} với giá $${payload.price}.`)
+            const actor = payload.playerName || resolveActorName(payload.ownerId || message.senderId)
+            const prefix = payload.bot === true ? '[Bot] ' : ''
+            appendLog(`${prefix}${actor} đã mua ${payload.tileName} với giá $${payload.price}.`)
             break
           }
           case 'ITEM_USED': {
-            const actor = resolveActorName(payload.actorId || message.senderId)
+            const actor = payload.playerName || resolveActorName(payload.actorId || message.senderId)
             appendLog(`${actor} đã kích hoạt vật phẩm ${payload.itemName || payload.itemId}.`)
             break
           }
           case 'BAIL_PAID': {
-            const actor = resolveActorName(payload.playerId || message.senderId)
+            const actor = payload.playerName || resolveActorName(payload.playerId || message.senderId)
             appendLog(`${actor} đã nộp $50 bảo lãnh ra tù.`)
             break
           }
           case 'TURN_CHANGED': {
             setRolling(false)
-            const nextPlayerName = resolveActorName(payload.currentPlayerId)
-            setTurnDeadline(Date.now() + 30000)
+            const nextPlayerName =
+              payload.currentPlayerName || resolveActorName(payload.currentPlayerId)
+            const prefix = payload.bot === true ? '[Bot] ' : ''
+            syncTurnDeadline(payload, true)
             setGameState((prev) => ({
               ...prev,
               turnId: payload.newTurnId ?? message.turnId ?? prev.turnId,
@@ -418,21 +523,34 @@ export default function GameRoomPage() {
               lastDice: payload.code === 'EXTRA_ROLL' ? prev.lastDice : null,
             }))
             if (payload.code === 'EXTRA_ROLL') {
-              appendLog(`${nextPlayerName} gieo đôi và được tung thêm lượt!`)
+              appendLog(`${prefix}${nextPlayerName} gieo đôi và được tung thêm lượt!`)
             } else {
               appendLog(`Chuyển lượt sang ${nextPlayerName} (Turn #${payload.newTurnId}).`)
             }
             break
           }
+          case 'GAME_FINISHED': {
+            setRolling(false)
+            appendLog('Ván đấu đã kết thúc!')
+            showToast('Ván đấu đã kết thúc!')
+            if (Array.isArray(payload.players) && payload.players.length > 0) {
+              applySnapshot({ ...payload, roomStatus: 'FINISHED', phase: 'FINISHED' })
+            } else {
+              void fetchSnapshot()
+            }
+            break
+          }
           case 'ROOM_JOINED': {
-            appendLog(`${resolveActorName(message.senderId)} đã tham gia phòng.`)
+            const actor = payload.playerName || resolveActorName(payload.playerId || message.senderId)
+            appendLog(`${actor} đã tham gia phòng.`)
             if (payload.hostId) {
               setGameState((prev) => ({ ...prev, hostId: payload.hostId }))
             }
             break
           }
           case 'ROOM_LEFT': {
-            appendLog(`${resolveActorName(message.senderId)} đã rời phòng.`)
+            const actor = payload.playerName || resolveActorName(payload.playerId || message.senderId)
+            appendLog(`${actor} đã rời phòng.`)
             if (payload.hostId) {
               setGameState((prev) => ({ ...prev, hostId: payload.hostId }))
             }
@@ -440,6 +558,7 @@ export default function GameRoomPage() {
           }
           case 'ROOM_DELETED': {
             sessionStorage.removeItem('activeRoomId')
+            sessionStorage.removeItem(getRoomLogsKey(resolvedRoomId))
             showToast('Phòng chơi đã giải tán.')
             navigate('/', { replace: true })
             break
@@ -467,7 +586,7 @@ export default function GameRoomPage() {
       socketRef.current = null
       setWsConnected(false)
     }
-  }, [resolvedRoomId, playerId, applySnapshot, appendLog, showToast, resolveActorName, navigate])
+  }, [resolvedRoomId, playerId, applySnapshot, appendLog, fetchSnapshot, showToast, syncTurnDeadline, resolveActorName, navigate])
 
   const myPlayer = gameState.players.find((player) => player.id === playerId) || null
   const currentPlayer =
@@ -508,7 +627,9 @@ export default function GameRoomPage() {
     : null
 
   const myItems = Array.isArray(myPlayer?.items) ? myPlayer.items : []
-  const turnTime = isPlaying ? Math.max(0, Math.ceil((turnDeadline - nowMs) / 1000)) : 0
+  const turnTime = isPlaying
+    ? Math.min(30, Math.max(0, Math.ceil((turnDeadline - nowMs) / 1000)))
+    : 0
 
   const startGame = async () => {
     if (!canStartGame) return
@@ -516,6 +637,7 @@ export default function GameRoomPage() {
     try {
       const response = await api.post(
         `/api/v1/rooms/${encodeURIComponent(resolvedRoomId)}/start`,
+        {},
       )
       if (response.data?.type === 'ERROR') {
         const errPayload = parseGamePayload(response.data)
@@ -568,11 +690,12 @@ export default function GameRoomPage() {
     if (leaving) return
     setLeaving(true)
     try {
-      await api.post(`/api/v1/rooms/${encodeURIComponent(resolvedRoomId)}/leave`)
+      await api.post(`/api/v1/rooms/${encodeURIComponent(resolvedRoomId)}/leave`, {})
     } catch {
       // Vẫn thoát về sảnh nếu phòng đã đóng trên server
     } finally {
       sessionStorage.removeItem('activeRoomId')
+      sessionStorage.removeItem(getRoomLogsKey(resolvedRoomId))
       socketRef.current?.disconnect()
       navigate('/', { replace: true })
     }
@@ -823,7 +946,7 @@ export default function GameRoomPage() {
                         </h4>
                         <p>
                           <Home size={10} />
-                          {ownedCount} đất <b>•</b>
+                          {ownedCount} đất <b className="meta-dot">•</b>{' '}
                           {player.status === 'IN_JAIL'
                             ? 'Trong tù'
                             : player.status === 'BANKRUPT'

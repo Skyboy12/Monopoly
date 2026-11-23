@@ -2,10 +2,13 @@ package server.gateway;
 
 import engine.GameEngine;
 import model.GameRoom;
+import model.Player;
 import network.GameMessage;
 import server.controller.AuthRestController;
 import server.controller.GameWebSocketController;
 import server.controller.RoomRestController;
+import server.database.Connector;
+import server.database.EloDAO;
 import server.exception.GlobalExceptionHandler;
 import server.persistence.UserAccount;
 import server.persistence.UserRepository;
@@ -201,17 +204,176 @@ public class ApiGatewayServer {
                 return;
             }
             GameEngine.EngineEvent.Type type = event.getType();
-            if (type == GameEngine.EngineEvent.Type.TURN_TIMED_OUT
-                    || type == GameEngine.EngineEvent.Type.BOT_TAKEOVER
-                    || type == GameEngine.EngineEvent.Type.EXTRA_ROLL_GRANTED
-                    || type == GameEngine.EngineEvent.Type.TURN_ENDED
-                    || type == GameEngine.EngineEvent.Type.GAME_FINISHED) {
-                ExecutorService pool = this.broadcastPool;
-                if (pool != null && !pool.isShutdown() && running) {
-                    String roomId = room.getId();
-                    pool.execute(() -> stompBroker.broadcastRoomSnapshot(roomId));
-                }
+            if (type != GameEngine.EngineEvent.Type.TURN_TIMED_OUT
+                    && type != GameEngine.EngineEvent.Type.BOT_TAKEOVER
+                    && type != GameEngine.EngineEvent.Type.DICE_ROLLED
+                    && type != GameEngine.EngineEvent.Type.PROPERTY_BOUGHT
+                    && type != GameEngine.EngineEvent.Type.EXTRA_ROLL_GRANTED
+                    && type != GameEngine.EngineEvent.Type.TURN_ENDED
+                    && type != GameEngine.EngineEvent.Type.GAME_FINISHED) {
+                return;
             }
+
+            ExecutorService pool = this.broadcastPool;
+            if (pool == null || pool.isShutdown() || !running) {
+                return;
+            }
+
+            String roomId = room.getId();
+            String playerId = event.getPlayerId() != null ? event.getPlayerId() : "";
+            int turnId = event.getTurnId();
+            Map<String, String> data = event.getData();
+            String actorName = resolveRoomPlayerName(room, playerId);
+
+            pool.execute(() -> {
+                if (!running) {
+                    return;
+                }
+                switch (type) {
+                    case TURN_TIMED_OUT -> {
+                        roomManagerService.appendRoomLog(
+                                roomId,
+                                actorName + " hết giờ lượt #" + turnId + " — Bot đang tiếp quản!"
+                        );
+                        String payload = String.format(
+                                "{\"playerId\":\"%s\",\"playerName\":\"%s\",\"reason\":\"TIMEOUT\"}",
+                                SimpleJson.escape(playerId),
+                                SimpleJson.escape(actorName)
+                        );
+                        stompBroker.broadcastToRoom(roomId, new GameMessage(
+                                "TURN_TIMED_OUT", playerId, roomId, turnId, payload
+                        ));
+                        stompBroker.broadcastRoomSnapshot(roomId);
+                    }
+                    case BOT_TAKEOVER -> {
+                        String payload = String.format(
+                                "{\"playerId\":\"%s\",\"playerName\":\"%s\"}",
+                                SimpleJson.escape(playerId),
+                                SimpleJson.escape(actorName)
+                        );
+                        stompBroker.broadcastToRoom(roomId, new GameMessage(
+                                "BOT_TAKEOVER", playerId, roomId, turnId, payload
+                        ));
+                    }
+                    case DICE_ROLLED -> {
+                        int d1 = parseIntSafe(data.get("dice1"), 0);
+                        int d2 = parseIntSafe(data.get("dice2"), 0);
+                        int total = parseIntSafe(data.get("total"), d1 + d2);
+                        int newPosition = 0;
+                        GameEngine engine = roomManagerService.getEngine(roomId);
+                        // Lấy phase ngoài synchronized (room) để tránh đảo ngược thứ tự khóa engine -> room.
+                        String enginePhase = (engine != null) ? engine.getCurrentPhase().name() : "AWAITING_DECISION";
+                        String phase = "AWAITING_DECISION";
+                        synchronized (room) {
+                            Player p = findPlayerInRoom(room, playerId);
+                            if (p != null) {
+                                newPosition = p.getPosition();
+                            }
+                            if (room.getTurnId() == turnId) {
+                                phase = enginePhase;
+                            }
+                        }
+                        roomManagerService.appendRoomLog(
+                                roomId,
+                                String.format("[Bot] %s gieo được %d + %d = %d -> Ô #%d",
+                                        actorName, d1, d2, total, newPosition)
+                        );
+                        String payload = String.format(
+                                "{\"bot\":true,\"code\":\"BOT_ROLL\",\"dice1\":%d,\"dice2\":%d,\"total\":%d,\"newPosition\":%d,\"phase\":\"%s\",\"currentTurnId\":%d}",
+                                d1, d2, total, newPosition, SimpleJson.escape(phase), turnId
+                        );
+                        stompBroker.broadcastToRoom(roomId, new GameMessage(
+                                "DICE_ROLLED", playerId, roomId, turnId, payload
+                        ));
+                    }
+                    case PROPERTY_BOUGHT -> {
+                        String tileName = data.getOrDefault("tile", "");
+                        int price = parseIntSafe(data.get("price"), 0);
+                        roomManagerService.appendRoomLog(
+                                roomId,
+                                String.format("[Bot] %s đã mua %s với giá $%d.", actorName, tileName, price)
+                        );
+                        String payload = String.format(
+                                "{\"bot\":true,\"ownerId\":\"%s\",\"tileName\":\"%s\",\"price\":%d}",
+                                SimpleJson.escape(playerId),
+                                SimpleJson.escape(tileName),
+                                price
+                        );
+                        stompBroker.broadcastToRoom(roomId, new GameMessage(
+                                "PROPERTY_BOUGHT", playerId, roomId, turnId, payload
+                        ));
+                    }
+                    case EXTRA_ROLL_GRANTED -> {
+                        roomManagerService.appendRoomLog(
+                                roomId,
+                                "[Bot] " + actorName + " gieo đôi và được tung thêm lượt!"
+                        );
+                        GameEngine engine = roomManagerService.getEngine(roomId);
+                        String phase = (engine != null) ? engine.getCurrentPhase().name() : "AWAITING_ROLL";
+                        String roomStatus;
+                        int currentTurnId;
+                        synchronized (room) {
+                            roomStatus = room.getStatus().name();
+                            currentTurnId = room.getTurnId();
+                        }
+                        String payload = String.format(
+                                "{\"code\":\"EXTRA_ROLL\",\"previousPlayerId\":\"%s\",\"currentPlayerId\":\"%s\",\"newTurnId\":%d,\"phase\":\"%s\",\"roomStatus\":\"%s\"}",
+                                SimpleJson.escape(playerId),
+                                SimpleJson.escape(playerId),
+                                currentTurnId,
+                                SimpleJson.escape(phase),
+                                SimpleJson.escape(roomStatus)
+                        );
+                        stompBroker.broadcastToRoom(roomId, new GameMessage(
+                                "TURN_CHANGED", playerId, roomId, currentTurnId, payload
+                        ));
+                        stompBroker.broadcastRoomSnapshot(roomId);
+                    }
+                    case TURN_ENDED -> {
+                        String nextPlayerId = data.getOrDefault("nextPlayerId", "");
+                        int nextTurnId = parseIntSafe(data.get("nextTurnId"), turnId + 1);
+                        String nextName = resolveRoomPlayerName(room, nextPlayerId);
+                        roomManagerService.appendRoomLog(
+                                roomId,
+                                String.format("Chuyển lượt sang %s (Turn #%d).", nextName, nextTurnId)
+                        );
+                        GameEngine engine = roomManagerService.getEngine(roomId);
+                        String phase = (engine != null) ? engine.getCurrentPhase().name() : "AWAITING_ROLL";
+                        String roomStatus;
+                        synchronized (room) {
+                            roomStatus = room.getStatus().name();
+                        }
+                        String payload = String.format(
+                                "{\"code\":\"OK\",\"previousPlayerId\":\"%s\",\"currentPlayerId\":\"%s\",\"newTurnId\":%d,\"phase\":\"%s\",\"roomStatus\":\"%s\"}",
+                                SimpleJson.escape(playerId),
+                                SimpleJson.escape(nextPlayerId),
+                                nextTurnId,
+                                SimpleJson.escape(phase),
+                                SimpleJson.escape(roomStatus)
+                        );
+                        stompBroker.broadcastToRoom(roomId, new GameMessage(
+                                "TURN_CHANGED", playerId, roomId, nextTurnId, payload
+                        ));
+                        stompBroker.broadcastRoomSnapshot(roomId);
+                    }
+                    case GAME_FINISHED -> {
+                        roomManagerService.appendRoomLog(roomId, "Ván đấu đã kết thúc!");
+                        recordFinishedMatchElo(room);
+                        String remainingPlayers = data.getOrDefault("remainingPlayers", "0");
+                        String senderId = playerId.isEmpty() ? "SERVER" : playerId;
+                        String payload = String.format(
+                                "{\"roomStatus\":\"FINISHED\",\"remainingPlayers\":\"%s\"}",
+                                SimpleJson.escape(remainingPlayers)
+                        );
+                        stompBroker.broadcastToRoom(roomId, new GameMessage(
+                                "GAME_FINISHED", senderId, roomId, turnId, payload
+                        ));
+                        stompBroker.broadcastRoomSnapshot(roomId);
+                    }
+                    default -> {
+                    }
+                }
+            });
         });
     }
 
@@ -372,10 +534,14 @@ public class ApiGatewayServer {
         try {
             // GET /health
             if ("GET".equals(method) && "/health".equals(path)) {
+                String dbStatus = userRepository.isDatabaseEnabled()
+                        ? (Connector.testConnection() ? "UP" : "DOWN")
+                        : "MEMORY";
                 String healthJson = String.format(
-                        "{\"status\":\"UP\",\"mode\":\"%s\",\"cloudflareProtectionEnabled\":%b,\"timestamp\":%d}",
+                        "{\"status\":\"UP\",\"mode\":\"%s\",\"cloudflareProtectionEnabled\":%b,\"database\":\"%s\",\"timestamp\":%d}",
                         SimpleJson.escape(config.getMode()),
                         originFilter.isProtectionEnabled(),
+                        dbStatus,
                         System.currentTimeMillis()
                 );
                 HttpResponseWriter.writeJson(out, 200, healthJson, keepAlive);
@@ -490,7 +656,9 @@ public class ApiGatewayServer {
             }
             GameMessage snapshot = wsController.buildSnapshotMessage(
                     engine,
-                    roomManagerService.getHostUserId(roomId)
+                    roomManagerService.getHostUserId(roomId),
+                    roomManagerService.getTurnDeadlineEpochMs(roomId),
+                    roomManagerService.getRoomLogs(roomId)
             );
             HttpResponseWriter.writeGameMessage(out, 200, snapshot, keepAlive);
             return;
@@ -510,6 +678,8 @@ public class ApiGatewayServer {
                 HttpResponseWriter.writeGameMessage(out, HttpResponseWriter.mapErrorStatus(res), res, keepAlive);
                 return;
             }
+            roomManagerService.appendRoomLog(roomId, resolvedName + " đã tham gia phòng.");
+            stompBroker.broadcastToRoom(roomId, res);
             stompBroker.broadcastRoomSnapshot(roomId);
             HttpResponseWriter.writeGameMessage(out, 200, res, keepAlive);
             return;
@@ -519,13 +689,18 @@ public class ApiGatewayServer {
             String userId = requireAuthenticatedUserId(authHeader, roomId, out, keepAlive);
             if (userId == null) return;
 
+            String leavingName = resolvePlayerDisplayNameInRoom(roomId, userId, authHeader);
             GameMessage res = roomController.leaveRoom(roomId, userId);
             if ("ERROR".equals(res.getType())) {
                 HttpResponseWriter.writeGameMessage(out, HttpResponseWriter.mapErrorStatus(res), res, keepAlive);
                 return;
             }
             if ("ROOM_LEFT".equals(res.getType())) {
+                roomManagerService.appendRoomLog(roomId, leavingName + " đã rời phòng.");
+                stompBroker.broadcastToRoom(roomId, res);
                 stompBroker.broadcastRoomSnapshot(roomId);
+            } else if ("ROOM_DELETED".equals(res.getType())) {
+                stompBroker.broadcastToRoom(roomId, res);
             }
             HttpResponseWriter.writeGameMessage(out, 200, res, keepAlive);
             return;
@@ -542,6 +717,7 @@ public class ApiGatewayServer {
                 HttpResponseWriter.writeGameMessage(out, HttpResponseWriter.mapErrorStatus(res), res, keepAlive);
                 return;
             }
+            roomManagerService.appendRoomLog(roomId, "Ván đấu đã bắt đầu!");
             stompBroker.broadcastToRoom(roomId, res);
             stompBroker.broadcastRoomSnapshot(roomId);
             HttpResponseWriter.writeGameMessage(out, 200, res, keepAlive);
@@ -593,6 +769,91 @@ public class ApiGatewayServer {
         }
         String jwtUsername = jwtTokenProvider.extractUsername(authHeader);
         return (jwtUsername != null && !jwtUsername.isBlank()) ? jwtUsername : userId;
+    }
+
+    private String resolvePlayerDisplayNameInRoom(String roomId, String userId, String authHeader) {
+        GameRoom room = roomManagerService.getRoom(roomId);
+        if (room != null && userId != null) {
+            synchronized (room) {
+                Player p = findPlayerInRoom(room, userId);
+                if (p != null && p.getName() != null && !p.getName().isBlank()) {
+                    return p.getName();
+                }
+            }
+        }
+        return resolveDisplayName(userId, authHeader, null);
+    }
+
+    private void recordFinishedMatchElo(GameRoom room) {
+        if (!userRepository.isDatabaseEnabled() || room == null) {
+            return;
+        }
+        String winnerIdStr = null;
+        java.util.List<String> loserIds = new java.util.ArrayList<>();
+        synchronized (room) {
+            for (Player p : room.getPlayers()) {
+                if (p.getStatus() != model.PlayerStatus.BANKRUPT && winnerIdStr == null) {
+                    winnerIdStr = p.getId();
+                } else {
+                    loserIds.add(p.getId());
+                }
+            }
+        }
+        if (winnerIdStr == null || loserIds.isEmpty()) {
+            return;
+        }
+        try {
+            int winnerId = Integer.parseInt(winnerIdStr);
+            EloDAO eloDao = new EloDAO();
+            for (String loserStr : loserIds) {
+                try {
+                    int loserId = Integer.parseInt(loserStr);
+                    if (winnerId != loserId) {
+                        eloDao.recordMatch(winnerId, loserId);
+                    }
+                } catch (Exception ignored) {
+                }
+            }
+        } catch (NumberFormatException ignored) {
+        }
+    }
+
+    private static String resolveRoomPlayerName(GameRoom room, String playerId) {
+        if (playerId == null || playerId.isBlank()) {
+            return "Hệ thống";
+        }
+        if (room != null) {
+            synchronized (room) {
+                Player p = findPlayerInRoom(room, playerId);
+                if (p != null && p.getName() != null && !p.getName().isBlank()) {
+                    return p.getName();
+                }
+            }
+        }
+        return playerId;
+    }
+
+    private static Player findPlayerInRoom(GameRoom room, String playerId) {
+        if (room == null || playerId == null) {
+            return null;
+        }
+        for (Player p : room.getPlayers()) {
+            if (playerId.equals(p.getId())) {
+                return p;
+            }
+        }
+        return null;
+    }
+
+    private static int parseIntSafe(String raw, int fallback) {
+        if (raw == null || raw.isBlank()) {
+            return fallback;
+        }
+        try {
+            return Integer.parseInt(raw.trim());
+        } catch (NumberFormatException ignored) {
+            return fallback;
+        }
     }
 
     private Map<String, Object> parseJsonBody(HttpRequestParser.HttpRequest request,

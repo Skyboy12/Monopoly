@@ -6,7 +6,6 @@ import model.tile.RailroadProperty;
 import model.tile.UtilityProperty;
 
 import java.util.ArrayList;
-import java.util.Collections;
 import java.util.List;
 
 /**

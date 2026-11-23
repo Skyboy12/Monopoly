@@ -39,11 +39,11 @@ export default function Topbar({ inGame = false, user = null, onLogout }) {
         </button>
       </nav>
       <div className="top-actions">
-        <div className="wallet">
-          <span>{displayName}</span>
+        <div className="wallet elo-badge" title={`Hồ sơ: ${displayName} — Điểm hạng ELO`}>
+          <span className="elo-username">{displayName}</span>
           <strong>
             <Star size={11} style={{ marginRight: 4, verticalAlign: '-1px' }} />
-            {Number(ratingPoints).toLocaleString()} ELO
+            Điểm hạng {Number(ratingPoints).toLocaleString()} ELO
           </strong>
         </div>
         <div className="avatar mini" title={displayName}>

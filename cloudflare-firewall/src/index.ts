@@ -105,7 +105,13 @@ export default {
     }
 
     // 8. Pre-validation JWT Token tại Edge cho các route cần xác thực
-    const isProtectedApi = path.startsWith('/api/rooms') || path.startsWith('/api/game') || path.startsWith('/api/v1/rooms');
+    const isProtectedApi =
+      path.startsWith('/api/rooms') ||
+      path.startsWith('/api/game') ||
+      path.startsWith('/api/v1/rooms') ||
+      path === '/api/v1/auth/me' ||
+      path === '/api/auth/me' ||
+      path === '/api/v1/users/me';
     if (isProtectedApi) {
       const authHeader = request.headers.get('Authorization');
       if (!authHeader || !JWT_FORMAT_REGEX.test(authHeader)) {
@@ -132,11 +138,27 @@ export default {
     const originUrl = new URL(path + url.search, originBase);
     const newHeaders = new Headers(request.headers);
 
+    // Xóa Host và header cf-* của hop trước để tránh lỗi định tuyến khi Worker fetch cùng zone
+    newHeaders.delete('host');
+    for (const key of Array.from(newHeaders.keys())) {
+      if (key.toLowerCase().startsWith('cf-')) {
+        newHeaders.delete(key);
+      }
+    }
+
     if (env.ORIGIN_SECRET_KEY) {
       newHeaders.set('X-Origin-Verify', env.ORIGIN_SECRET_KEY);
     }
     newHeaders.set('X-Forwarded-For', request.headers.get('CF-Connecting-IP') || '');
     newHeaders.set('X-Forwarded-Proto', 'https');
+
+    // WebSocket upgrade phải trả nguyên Response 101 từ fetch để giữ nguyên webSocket tunnel
+    if (isWs) {
+      return fetch(originUrl.toString(), {
+        method: request.method,
+        headers: newHeaders,
+      });
+    }
 
     try {
       const originResponse = await fetch(originUrl.toString(), {

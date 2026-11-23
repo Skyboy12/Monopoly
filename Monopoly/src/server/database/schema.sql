@@ -1,0 +1,26 @@
+CREATE TABLE IF NOT EXISTS users (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    username VARCHAR(50) NOT NULL UNIQUE,
+    display_name VARCHAR(100) NULL,
+    password_hash VARCHAR(128) NOT NULL,
+    elo INT NOT NULL DEFAULT 1000,
+    wins INT NOT NULL DEFAULT 0,
+    losses INT NOT NULL DEFAULT 0,
+    games_played INT NOT NULL DEFAULT 0,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    INDEX idx_elo (elo DESC)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+CREATE TABLE IF NOT EXISTS match_history (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    winner_id INT NOT NULL,
+    loser_id INT NOT NULL,
+    winner_elo_before INT NOT NULL,
+    winner_elo_after INT NOT NULL,
+    loser_elo_before INT NOT NULL,
+    loser_elo_after INT NOT NULL,
+    played_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (winner_id) REFERENCES users(id) ON DELETE CASCADE,
+    FOREIGN KEY (loser_id) REFERENCES users(id) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;

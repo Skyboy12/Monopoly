@@ -1,6 +1,7 @@
 import server.controller.AuthRestController;
 import server.controller.GameWebSocketController;
 import server.controller.RoomRestController;
+import server.database.Connector;
 import server.gateway.ApiGatewayServer;
 import server.gateway.GatewayConfig;
 import server.persistence.UserRepository;
@@ -10,6 +11,7 @@ import server.security.PasswordEncoderUtil;
 import server.service.RoomManagerService;
 
 import java.io.IOException;
+import java.sql.SQLException;
 
 /**
  * Entry point chính của dự án Monopoly Backend.
@@ -28,7 +30,29 @@ public class Main {
                 config.getJwtValidityMs()
         );
         PasswordEncoderUtil passwordEncoder = new PasswordEncoderUtil();
-        UserRepository userRepository = new UserRepository();
+
+        UserRepository userRepository;
+        if (Connector.isConfigured()) {
+            try {
+                Connector.initSchema();
+                if (!Connector.testConnection()) {
+                    throw new SQLException("SELECT 1 verification failed");
+                }
+                userRepository = UserRepository.withMySql();
+                System.out.println("Database: MySQL CONNECTED (" + Connector.getSafeConnectionSummary() + ")");
+            } catch (SQLException e) {
+                if ("prod".equals(config.getMode())) {
+                    System.err.println("Không thể kết nối cơ sở dữ liệu MySQL (" + Connector.getSafeConnectionSummary() + "): " + e.getMessage());
+                    System.exit(1);
+                    return;
+                }
+                System.err.println("Cảnh báo: Không kết nối được MySQL (" + e.getMessage() + "), chuyển sang In-Memory fallback trong dev mode.");
+                userRepository = new UserRepository();
+            }
+        } else {
+            userRepository = new UserRepository();
+            System.out.println("Database: IN-MEMORY (chưa cấu hình biến DATABASE)");
+        }
 
         // 2. Khởi tạo Services & Controllers
         RoomManagerService roomManager = new RoomManagerService();

@@ -1,6 +1,8 @@
 package server.gateway;
 
 import engine.GameEngine;
+import model.GameRoom;
+import model.Player;
 import model.item.ItemTargetContext;
 import network.GameMessage;
 import server.controller.GameWebSocketController;
@@ -9,7 +11,6 @@ import server.security.JwtTokenProvider;
 import server.service.RoomManagerService;
 
 import java.io.ByteArrayOutputStream;
-import java.io.EOFException;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
@@ -131,7 +132,12 @@ public class WebSocketStompBroker {
         if (engine == null) {
             return;
         }
-        GameMessage snapshot = wsController.buildSnapshotMessage(engine, roomManagerService.getHostUserId(roomId));
+        GameMessage snapshot = wsController.buildSnapshotMessage(
+                engine,
+                roomManagerService.getHostUserId(roomId),
+                roomManagerService.getTurnDeadlineEpochMs(roomId),
+                roomManagerService.getRoomLogs(roomId)
+        );
         broadcastToRoom(roomId, snapshot);
     }
 
@@ -482,7 +488,9 @@ public class WebSocketStompBroker {
                 if (engine != null) {
                     GameMessage snapshot = wsController.buildSnapshotMessage(
                             engine,
-                            roomManagerService.getHostUserId(roomId)
+                            roomManagerService.getHostUserId(roomId),
+                            roomManagerService.getTurnDeadlineEpochMs(roomId),
+                            roomManagerService.getRoomLogs(roomId)
                     );
                     sendStompMessage(entry, SimpleJson.toJson(snapshot));
                 }
@@ -587,9 +595,122 @@ public class WebSocketStompBroker {
         if ("ERROR".equals(result.getType())) {
             sendToPlayerErrors(userId, result);
         } else {
+            recordDirectCommandLog(roomId, result);
             broadcastToRoom(roomId, result);
             broadcastRoomSnapshot(roomId);
         }
+    }
+
+    private void recordDirectCommandLog(String roomId, GameMessage result) {
+        if (roomId == null || result == null || result.getType() == null) {
+            return;
+        }
+        Map<String, Object> payloadMap;
+        try {
+            String rawPayload = result.getPayload();
+            payloadMap = (rawPayload == null || rawPayload.isBlank())
+                    ? Map.of()
+                    : SimpleJson.parseObject(rawPayload);
+        } catch (IllegalArgumentException ignored) {
+            payloadMap = Map.of();
+        }
+
+        switch (result.getType()) {
+            case "DICE_ROLLED" -> {
+                String actorName = resolvePlayerName(roomId, result.getSenderId());
+                int d1 = SimpleJson.getInt(payloadMap, "dice1", 0);
+                int d2 = SimpleJson.getInt(payloadMap, "dice2", 0);
+                int total = SimpleJson.getInt(payloadMap, "total", d1 + d2);
+                int newPos = SimpleJson.getInt(payloadMap, "newPosition", 0);
+                String code = SimpleJson.getString(payloadMap, "code");
+                String suffix = "THREE_DOUBLES".equals(code)
+                        ? " (Gieo đôi 3 lần -> Vào tù!)"
+                        : " -> Ô #" + newPos;
+                roomManagerService.appendRoomLog(
+                        roomId,
+                        String.format("%s gieo được %d + %d = %d%s", actorName, d1, d2, total, suffix)
+                );
+                if ("GAME_FINISHED".equals(code)) {
+                    roomManagerService.appendRoomLog(roomId, "Ván đấu đã kết thúc!");
+                }
+            }
+            case "PROPERTY_BOUGHT" -> {
+                String ownerId = SimpleJson.getString(payloadMap, "ownerId");
+                String actorName = resolvePlayerName(roomId, ownerId != null ? ownerId : result.getSenderId());
+                String tileName = SimpleJson.getString(payloadMap, "tileName");
+                int price = SimpleJson.getInt(payloadMap, "price", 0);
+                roomManagerService.appendRoomLog(
+                        roomId,
+                        String.format("%s đã mua %s với giá $%d.",
+                                actorName,
+                                tileName != null ? tileName : "tài sản",
+                                price)
+                );
+            }
+            case "ITEM_USED" -> {
+                String actorId = SimpleJson.getString(payloadMap, "actorId");
+                String actorName = resolvePlayerName(roomId, actorId != null ? actorId : result.getSenderId());
+                String itemName = SimpleJson.getString(payloadMap, "itemName");
+                if (itemName == null || itemName.isBlank()) {
+                    itemName = SimpleJson.getString(payloadMap, "itemId");
+                }
+                roomManagerService.appendRoomLog(
+                        roomId,
+                        String.format("%s đã kích hoạt vật phẩm %s.",
+                                actorName,
+                                itemName != null ? itemName : "")
+                );
+            }
+            case "BAIL_PAID" -> {
+                String playerId = SimpleJson.getString(payloadMap, "playerId");
+                String actorName = resolvePlayerName(roomId, playerId != null ? playerId : result.getSenderId());
+                roomManagerService.appendRoomLog(
+                        roomId,
+                        actorName + " đã nộp $50 bảo lãnh ra tù."
+                );
+            }
+            case "TURN_CHANGED" -> {
+                String code = SimpleJson.getString(payloadMap, "code");
+                String nextPlayerId = SimpleJson.getString(payloadMap, "currentPlayerId");
+                String nextPlayerName = resolvePlayerName(roomId, nextPlayerId);
+                int newTurnId = SimpleJson.getInt(payloadMap, "newTurnId", result.getTurnId());
+                String roomStatus = SimpleJson.getString(payloadMap, "roomStatus");
+                if ("EXTRA_ROLL".equals(code)) {
+                    roomManagerService.appendRoomLog(
+                            roomId,
+                            nextPlayerName + " gieo đôi và được tung thêm lượt!"
+                    );
+                } else {
+                    roomManagerService.appendRoomLog(
+                            roomId,
+                            String.format("Chuyển lượt sang %s (Turn #%d).", nextPlayerName, newTurnId)
+                    );
+                }
+                if ("FINISHED".equals(roomStatus)) {
+                    roomManagerService.appendRoomLog(roomId, "Ván đấu đã kết thúc!");
+                }
+            }
+            default -> {
+            }
+        }
+    }
+
+    private String resolvePlayerName(String roomId, String playerId) {
+        if (playerId == null || playerId.isBlank()) {
+            return "Hệ thống";
+        }
+        GameRoom room = roomManagerService.getRoom(roomId);
+        if (room != null) {
+            synchronized (room) {
+                for (Player p : room.getPlayers()) {
+                    if (playerId.equals(p.getId())) {
+                        String name = p.getName();
+                        return (name != null && !name.isBlank()) ? name : playerId;
+                    }
+                }
+            }
+        }
+        return playerId;
     }
 
     private void handleDisconnect(StompSession session, Map<String, String> headers) throws IOException {

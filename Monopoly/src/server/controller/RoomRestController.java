@@ -180,12 +180,16 @@ public class RoomRestController {
                 return errorMessage(roomId, hostUserId, room.getTurnId(),
                         "FORBIDDEN_NOT_HOST", "Chỉ chủ phòng mới có quyền bắt đầu ván đấu.");
             }
+        }
 
-            ActionResult result = engine.startGame(roomId, "START-" + UUID.randomUUID());
-            if (!result.isSuccess()) {
+        ActionResult result = engine.startGame(roomId, "START-" + UUID.randomUUID());
+        if (!result.isSuccess()) {
+            synchronized (room) {
                 return errorMessage(roomId, hostUserId, room.getTurnId(), result.getCode(), result.getMessage());
             }
+        }
 
+        synchronized (room) {
             return new GameMessage(
                     "GAME_STARTED",
                     hostUserId,

@@ -69,7 +69,15 @@ public abstract class PropertyTile extends Tile {
             return;
         }
 
-        // 2b. Nếu người chơi có Khiên Hộ mệnh -> tiêu thụ khiên và miễn tiền thuê
+        // 2b. Nếu người chơi có Khiên Hộ mệnh (hoặc đang sở hữu trong túi đồ ở pha ON_LAND) -> kích hoạt & miễn tiền thuê
+        if (!player.isRentShieldActive() && player.getInventory() != null) {
+            model.item.Item shield = player.getInventory().getItemById("RENT_SHIELD");
+            if (shield != null && shield.canUse(player, room, null)) {
+                if (shield.applyEffect(player, room, null)) {
+                    player.getInventory().removeItem("RENT_SHIELD");
+                }
+            }
+        }
         if (player.isRentShieldActive()) {
             player.setRentShieldActive(false);
             return;

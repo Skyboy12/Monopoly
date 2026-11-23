@@ -3,8 +3,12 @@ package server.service;
 import engine.GameEngine;
 import model.GameRoom;
 
+import java.time.LocalTime;
+import java.time.format.DateTimeFormatter;
+import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.Deque;
 import java.util.List;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Executors;
@@ -15,9 +19,13 @@ import java.util.function.BiConsumer;
  * Tích hợp trực tiếp với GameEngine và TurnTimerService của Thành viên 3.
  */
 public class RoomManagerService {
+    private static final int MAX_ROOM_LOGS = 30;
+    private static final DateTimeFormatter LOG_TIME_FORMATTER = DateTimeFormatter.ofPattern("HH:mm:ss");
+
     private final ConcurrentHashMap<String, GameRoom> activeRooms;
     private final ConcurrentHashMap<String, GameEngine> roomEngines;
     private final ConcurrentHashMap<String, String> roomHosts;
+    private final ConcurrentHashMap<String, Deque<String>> roomLogs;
     private final TurnTimerService turnTimerService;
     private volatile BiConsumer<GameRoom, GameEngine.EngineEvent> globalEngineEventListener;
 
@@ -33,6 +41,7 @@ public class RoomManagerService {
         this.activeRooms = new ConcurrentHashMap<>();
         this.roomEngines = new ConcurrentHashMap<>();
         this.roomHosts = new ConcurrentHashMap<>();
+        this.roomLogs = new ConcurrentHashMap<>();
         this.turnTimerService = turnTimerService;
     }
 
@@ -112,6 +121,40 @@ public class RoomManagerService {
         return Collections.unmodifiableList(new ArrayList<>(activeRooms.values()));
     }
 
+    public long getTurnDeadlineEpochMs(String roomId) {
+        if (turnTimerService == null || roomId == null) {
+            return 0L;
+        }
+        return turnTimerService.getTurnDeadlineEpochMs(roomId);
+    }
+
+    public void appendRoomLog(String roomId, String message) {
+        if (roomId == null || roomId.isBlank() || message == null || message.isBlank()) {
+            return;
+        }
+        String entry = "[" + LocalTime.now().format(LOG_TIME_FORMATTER) + "] " + message.trim();
+        Deque<String> deque = roomLogs.computeIfAbsent(roomId, ignored -> new ArrayDeque<>());
+        synchronized (deque) {
+            deque.addFirst(entry);
+            while (deque.size() > MAX_ROOM_LOGS) {
+                deque.removeLast();
+            }
+        }
+    }
+
+    public List<String> getRoomLogs(String roomId) {
+        if (roomId == null) {
+            return List.of();
+        }
+        Deque<String> deque = roomLogs.get(roomId);
+        if (deque == null) {
+            return List.of();
+        }
+        synchronized (deque) {
+            return List.copyOf(deque);
+        }
+    }
+
     public boolean deleteRoom(String roomId) {
         if (roomId == null) return false;
         if (turnTimerService != null) {
@@ -119,6 +162,7 @@ public class RoomManagerService {
         }
         roomEngines.remove(roomId);
         roomHosts.remove(roomId);
+        roomLogs.remove(roomId);
         return activeRooms.remove(roomId) != null;
     }
 

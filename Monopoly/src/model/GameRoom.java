@@ -24,6 +24,7 @@ public class GameRoom {
     private Dice lastDice;
     private Integer forcedDiceValue;
     private int rentMultiplier = 1;
+    private final model.event.GameEventManager eventManager;
 
     public GameRoom(String id, String name, int maxPlayers) {
         this.id = id;
@@ -35,6 +36,7 @@ public class GameRoom {
         this.currentTurnPlayerIndex = 0;
         this.turnId = 1;
         this.lastDice = null;
+        this.eventManager = new model.event.GameEventManager();
     }
 
     public String getId() {
@@ -75,6 +77,10 @@ public class GameRoom {
 
     public synchronized void setRentMultiplier(int rentMultiplier) {
         this.rentMultiplier = rentMultiplier;
+    }
+
+    public model.event.GameEventManager getEventManager() {
+        return eventManager;
     }
 
     public synchronized int getTurnId() {

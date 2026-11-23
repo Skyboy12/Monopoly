@@ -23,6 +23,7 @@ public class TurnTimerService {
 
     private final ScheduledExecutorService scheduler;
     private final ConcurrentHashMap<String, ScheduledFuture<?>> roomTimers;
+    private final ConcurrentHashMap<String, Long> roomDeadlines;
     private final int turnTimeoutSeconds;
 
     public TurnTimerService(ScheduledExecutorService scheduler,
@@ -34,6 +35,7 @@ public class TurnTimerService {
 
         this.scheduler = scheduler;
         this.roomTimers = new ConcurrentHashMap<>();
+        this.roomDeadlines = new ConcurrentHashMap<>();
         this.turnTimeoutSeconds = turnTimeoutSeconds;
     }
 
@@ -44,7 +46,7 @@ public class TurnTimerService {
      * @param turnId Số hiệu lượt đi hiện tại
      * @param engine GameEngine của phòng cờ
      */
-    public synchronized void startTurnTimer(
+    public void startTurnTimer(
             String roomId, int turnId, GameEngine engine) {
 
         if (roomId == null || engine == null
@@ -95,8 +97,9 @@ public class TurnTimerService {
 
             reference.set(future);
 
-            // 3. Lưu timer vào map.
+            // 3. Lưu timer và deadline vào map.
             roomTimers.put(roomId, future);
+            roomDeadlines.put(roomId, System.currentTimeMillis() + turnTimeoutSeconds * 1000L);
         }
     }
 
@@ -105,12 +108,13 @@ public class TurnTimerService {
      *
      * @param roomId Mã phòng chơi
      */
-    public synchronized void cancelTurnTimer(String roomId) {
+    public void cancelTurnTimer(String roomId) {
 
         if (roomId == null) {
             return;
         }
 
+        roomDeadlines.remove(roomId);
         // Lấy timer khỏi map.
         ScheduledFuture<?> future = roomTimers.remove(roomId);
 
@@ -118,6 +122,27 @@ public class TurnTimerService {
             // Hủy timer cũ.
             future.cancel(true);
         }
+    }
+
+    /**
+     * Lấy mốc thời gian hết hạn lượt hiện tại (epoch milliseconds) của phòng.
+     *
+     * @param roomId Mã phòng chơi
+     * @return Epoch ms hoặc 0L nếu không có bộ đếm đang chạy
+     */
+    public long getTurnDeadlineEpochMs(String roomId) {
+        if (roomId == null) {
+            return 0L;
+        }
+        Long deadline = roomDeadlines.get(roomId);
+        return deadline != null ? deadline : 0L;
+    }
+
+    /**
+     * Trả về thời lượng tối đa mỗi lượt (giây).
+     */
+    public int getTurnTimeoutSeconds() {
+        return turnTimeoutSeconds;
     }
 
     /**
@@ -130,6 +155,7 @@ public class TurnTimerService {
             }
         }
         roomTimers.clear();
+        roomDeadlines.clear();
         scheduler.shutdownNow();
     }
 
@@ -164,23 +190,26 @@ public class TurnTimerService {
                     || currentPlayer == null
                     || !currentPlayer.getId().equals(playerId)) {
 
-                roomTimers.remove(roomId, future);
+                if (roomTimers.remove(roomId, future)) {
+                    roomDeadlines.remove(roomId);
+                }
                 return;
             }
 
-            // Xóa timer đã hết hạn.
-            roomTimers.remove(roomId, future);
-
-            // Chuyển trạng thái lượt sang TIMEOUT.
-            ActionResult result = engine.handleTimeout(
-                    roomId,
-                    playerId,
-                    turnId,
-                    "TIMEOUT-" + UUID.randomUUID()
-            );
-
-            timeoutAccepted = result.isSuccess();
+            // Xóa timer đã hết hạn trước khi gọi engine ngoài synchronized (room).
+            if (roomTimers.remove(roomId, future)) {
+                roomDeadlines.remove(roomId);
+            }
         }
+
+        // Chuyển trạng thái lượt sang TIMEOUT (không giữ khóa room khi gọi engine để tránh đảo ngược khóa).
+        ActionResult result = engine.handleTimeout(
+                roomId,
+                playerId,
+                turnId,
+                "TIMEOUT-" + UUID.randomUUID()
+        );
+        timeoutAccepted = result.isSuccess();
 
         /*
          * 4. Chỉ gọi Bot khi timeout hợp lệ.

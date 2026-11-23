@@ -74,25 +74,27 @@ export default function Board({
             const ownerColor = tile.ownerId ? playerColorMap.get(tile.ownerId) : null
             const isStreet = tile.type === 'STREET' && tile.color
             const isActiveHere = playersHere.some((player) => player.id === currentPlayerId)
+            const edgeSide =
+              position.row === 11
+                ? 'bottom'
+                : position.row === 1
+                  ? 'top'
+                  : position.col === 1
+                    ? 'left'
+                    : 'right'
+            const edgeClass = corner ? '' : `tile-edge-${edgeSide}`
+            const hasPawns = playersHere.length > 0
 
             return (
               <div
-                className={`board-tile ${corner ? 'corner-tile' : ''} ${tile.frozen ? 'tile-frozen' : ''} ${isActiveHere ? 'tile-active' : ''}`}
+                className={`board-tile ${corner ? 'corner-tile' : ''} ${edgeClass} ${hasPawns ? 'has-pawns' : ''} ${tile.frozen ? 'tile-frozen' : ''} ${isActiveHere ? 'tile-active' : ''}`}
                 style={{ gridRow: position.row, gridColumn: position.col }}
                 key={tile.index}
                 title={`#${tile.index} ${tile.name}${tile.price > 0 ? ` ($${tile.price})` : ''}`}
               >
                 {isStreet && (
                   <div
-                    className={`tile-color tile-color-${
-                      position.row === 11
-                        ? 'bottom'
-                        : position.row === 1
-                          ? 'top'
-                          : position.col === 1
-                            ? 'left'
-                            : 'right'
-                    }`}
+                    className={`tile-color tile-color-${edgeSide}`}
                     style={{ background: tile.color }}
                   />
                 )}
@@ -134,11 +136,13 @@ export default function Board({
               </div>
             </div>
             <div className="dice-zone">
-              <div className={`dice-cube ${rolling ? 'dice-rolling' : ''}`}>
-                <span>{d1}</span>
-              </div>
-              <div className={`dice-cube ${rolling ? 'dice-rolling' : ''}`}>
-                <span>{d2}</span>
+              <div className="dice-cubes">
+                <div className={`dice-cube ${rolling ? 'dice-rolling' : ''}`}>
+                  <span>{d1}</span>
+                </div>
+                <div className={`dice-cube ${rolling ? 'dice-rolling' : ''}`}>
+                  <span>{d2}</span>
+                </div>
               </div>
               <div className="dice-total">{totalText}</div>
             </div>
