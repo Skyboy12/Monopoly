@@ -4,13 +4,14 @@ import { Crown, Building2, Coins, LogOut, Trophy } from 'lucide-react'
 import Logo from '../../components/Logo'
 import { PLAYER_COLORS } from '../../data/gameData'
 import api, { parseGamePayload } from '../../plugins/api'
+import { formatMoney } from '../../utils/money'
 
 function computeStandings(players, tiles) {
   const tilePriceByOwner = {}
   if (Array.isArray(tiles)) {
     tiles.forEach((tile) => {
       if (tile.ownerId) {
-        const buildingCost = tile.buildingCost || 50
+        const buildingCost = tile.buildingCost || 50000
         const buildingValue = tile.hasHotel
           ? 5 * buildingCost
           : (tile.houseCount || 0) * buildingCost
@@ -178,7 +179,7 @@ export default function FinishPage() {
             <h1>
               <Crown size={24} /> {winner.name}
             </h1>
-            <p>Tổng tài sản ${winner.netWorth.toLocaleString()}</p>
+            <p>Tổng tài sản {formatMoney(winner.netWorth)}</p>
           </div>
           <div className="podium">
             {podiumOrder.map((player) => (
@@ -192,7 +193,7 @@ export default function FinishPage() {
                   {player.avatar}
                 </div>
                 <h3>{player.name}</h3>
-                <strong>${player.netWorth.toLocaleString()}</strong>
+                <strong>{formatMoney(player.netWorth)}</strong>
                 <small>
                   <Building2 size={12} />
                   {player.propertyCount} bất động sản
@@ -226,9 +227,9 @@ export default function FinishPage() {
                   {player.rank === 1 && <em>Vô địch</em>}
                 </div>
                 <span>{player.isBankrupt ? 'Phá sản' : 'Hoạt động'}</span>
-                <span>${player.cash.toLocaleString()}</span>
-                <span>{player.propertyCount} ô (${player.assetValue.toLocaleString()})</span>
-                <span>${player.netWorth.toLocaleString()}</span>
+                <span>{formatMoney(player.cash)}</span>
+                <span>{player.propertyCount} ô ({formatMoney(player.assetValue)})</span>
+                <span>{formatMoney(player.netWorth)}</span>
               </div>
             ))}
           </div>

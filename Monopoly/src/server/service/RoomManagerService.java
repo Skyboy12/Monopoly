@@ -4,7 +4,8 @@ import engine.GameEngine;
 import model.GameRoom;
 import model.RoomStatus;
 
-import java.time.LocalTime;
+import java.time.Instant;
+import java.time.ZoneId;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
@@ -16,6 +17,7 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.BiConsumer;
 
 /**
@@ -23,19 +25,26 @@ import java.util.function.BiConsumer;
  * Tích hợp trực tiếp với GameEngine và TurnTimerService của Thành viên 3.
  */
 public class RoomManagerService {
-    private static final int MAX_ROOM_LOGS = 30;
+    public record RoomLogEntry(long id, long ts, String message) {
+    }
+
+    private static final int MAX_ROOM_LOGS = 60;
     private static final long FINISHED_ROOM_IDLE_MS = 10L * 60L * 1000L; // 10 minutes
     private static final long WAITING_ROOM_IDLE_MS = 30L * 60L * 1000L; // 30 minutes
-    private static final DateTimeFormatter LOG_TIME_FORMATTER = DateTimeFormatter.ofPattern("HH:mm:ss");
+    private static final ZoneId LOG_ZONE = ZoneId.of("Asia/Ho_Chi_Minh");
+    private static final DateTimeFormatter LOG_TIME_FORMATTER =
+            DateTimeFormatter.ofPattern("HH:mm:ss").withZone(LOG_ZONE);
 
     private final ConcurrentHashMap<String, GameRoom> activeRooms;
     private final ConcurrentHashMap<String, GameEngine> roomEngines;
     private final ConcurrentHashMap<String, String> roomHosts;
-    private final ConcurrentHashMap<String, Deque<String>> roomLogs;
+    private final ConcurrentHashMap<String, Deque<RoomLogEntry>> roomTimeline;
+    private final ConcurrentHashMap<String, AtomicLong> roomLogSeq;
     private final ConcurrentHashMap<String, Long> roomLastActivityMs;
     private final TurnTimerService turnTimerService;
     private final ScheduledExecutorService cleanupScheduler;
     private volatile BiConsumer<GameRoom, GameEngine.EngineEvent> globalEngineEventListener;
+    private volatile BiConsumer<String, RoomLogEntry> logListener;
 
     public RoomManagerService() {
         this(new TurnTimerService(Executors.newScheduledThreadPool(4, r -> {
@@ -49,7 +58,8 @@ public class RoomManagerService {
         this.activeRooms = new ConcurrentHashMap<>();
         this.roomEngines = new ConcurrentHashMap<>();
         this.roomHosts = new ConcurrentHashMap<>();
-        this.roomLogs = new ConcurrentHashMap<>();
+        this.roomTimeline = new ConcurrentHashMap<>();
+        this.roomLogSeq = new ConcurrentHashMap<>();
         this.roomLastActivityMs = new ConcurrentHashMap<>();
         this.turnTimerService = turnTimerService;
         this.cleanupScheduler = Executors.newSingleThreadScheduledExecutor(r -> {
@@ -58,13 +68,17 @@ public class RoomManagerService {
             return t;
         });
         this.cleanupScheduler.scheduleAtFixedRate(
-                createCleanupTask(activeRooms, roomEngines, roomHosts, roomLogs, roomLastActivityMs, turnTimerService),
+                createCleanupTask(activeRooms, roomEngines, roomHosts, roomTimeline, roomLogSeq, roomLastActivityMs, turnTimerService),
                 60, 60, TimeUnit.SECONDS
         );
     }
 
     public void setGlobalEngineEventListener(BiConsumer<GameRoom, GameEngine.EngineEvent> listener) {
         this.globalEngineEventListener = listener;
+    }
+
+    public void setLogListener(BiConsumer<String, RoomLogEntry> listener) {
+        this.logListener = listener;
     }
 
     public GameRoom createRoom(String roomId, String roomName, int maxPlayers) {
@@ -162,27 +176,48 @@ public class RoomManagerService {
             return;
         }
         touchRoom(roomId);
-        String entry = "[" + LocalTime.now().format(LOG_TIME_FORMATTER) + "] " + message.trim();
-        Deque<String> deque = roomLogs.computeIfAbsent(roomId, ignored -> new ArrayDeque<>());
+        long id = roomLogSeq.computeIfAbsent(roomId, ignored -> new AtomicLong(0L)).incrementAndGet();
+        long ts = System.currentTimeMillis();
+        RoomLogEntry entry = new RoomLogEntry(id, ts, message.trim());
+        Deque<RoomLogEntry> deque = roomTimeline.computeIfAbsent(roomId, ignored -> new ArrayDeque<>());
         synchronized (deque) {
             deque.addFirst(entry);
             while (deque.size() > MAX_ROOM_LOGS) {
                 deque.removeLast();
             }
         }
+        BiConsumer<String, RoomLogEntry> listener = this.logListener;
+        if (listener != null) {
+            try {
+                listener.accept(roomId, entry);
+            } catch (RuntimeException ignored) {
+            }
+        }
     }
 
-    public List<String> getRoomLogs(String roomId) {
+    public List<RoomLogEntry> getRoomTimeline(String roomId) {
         if (roomId == null) {
             return List.of();
         }
-        Deque<String> deque = roomLogs.get(roomId);
+        Deque<RoomLogEntry> deque = roomTimeline.get(roomId);
         if (deque == null) {
             return List.of();
         }
         synchronized (deque) {
             return List.copyOf(deque);
         }
+    }
+
+    public List<String> getRoomLogs(String roomId) {
+        List<RoomLogEntry> entries = getRoomTimeline(roomId);
+        if (entries.isEmpty()) {
+            return List.of();
+        }
+        List<String> formatted = new ArrayList<>(entries.size());
+        for (RoomLogEntry entry : entries) {
+            formatted.add("[" + LOG_TIME_FORMATTER.format(Instant.ofEpochMilli(entry.ts())) + "] " + entry.message());
+        }
+        return Collections.unmodifiableList(formatted);
     }
 
     public boolean deleteRoom(String roomId) {
@@ -192,7 +227,8 @@ public class RoomManagerService {
         }
         roomEngines.remove(roomId);
         roomHosts.remove(roomId);
-        roomLogs.remove(roomId);
+        roomTimeline.remove(roomId);
+        roomLogSeq.remove(roomId);
         roomLastActivityMs.remove(roomId);
         return activeRooms.remove(roomId) != null;
     }
@@ -201,7 +237,8 @@ public class RoomManagerService {
             ConcurrentHashMap<String, GameRoom> activeRooms,
             ConcurrentHashMap<String, GameEngine> roomEngines,
             ConcurrentHashMap<String, String> roomHosts,
-            ConcurrentHashMap<String, Deque<String>> roomLogs,
+            ConcurrentHashMap<String, Deque<RoomLogEntry>> roomTimeline,
+            ConcurrentHashMap<String, AtomicLong> roomLogSeq,
             ConcurrentHashMap<String, Long> roomLastActivityMs,
             TurnTimerService turnTimerService) {
         return () -> {
@@ -226,7 +263,8 @@ public class RoomManagerService {
                     }
                     roomEngines.remove(roomId);
                     roomHosts.remove(roomId);
-                    roomLogs.remove(roomId);
+                    roomTimeline.remove(roomId);
+                    roomLogSeq.remove(roomId);
                     roomLastActivityMs.remove(roomId);
                     activeRooms.remove(roomId);
                 }

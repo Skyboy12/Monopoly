@@ -10,7 +10,7 @@ import model.Player;
  * Khi người chơi đáp vào hoặc đi qua ô GO, cộng tiền thưởng GO_REWARD ($200) cho người chơi.
  */
 public class GoTile extends Tile {
-    public static final int GO_REWARD = 200;
+    public static final int GO_REWARD = 200_000;
 
     public GoTile(int index, String name) {
         super(index, name);

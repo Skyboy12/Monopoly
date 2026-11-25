@@ -39,7 +39,7 @@ import java.util.function.Supplier;
  * Hỗ trợ handshake SHA-1, protocol negotiation (@stomp/stompjs), frame mask/unmask/fragmentation/ping-pong/close,
  * xác thực JWT bắt buộc khi CONNECT/STOMP và ủy quyền tuyệt đối qua GameWebSocketController.
  */
-public class WebSocketStompBroker {
+public final class WebSocketStompBroker {
     private static final String WS_MAGIC_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
     private static final int MAX_WS_PAYLOAD_BYTES = 1024 * 1024; // 1 MB
     private static final List<String> SUPPORTED_WS_PROTOCOLS = List.of("v12.stomp", "v11.stomp", "v10.stomp", "stomp");
@@ -61,6 +61,19 @@ public class WebSocketStompBroker {
         this.jwtTokenProvider = jwtTokenProvider;
         this.roomManagerService = roomManagerService;
         this.wsController = wsController;
+        if (roomManagerService != null) {
+            roomManagerService.setLogListener((roomId, entry) -> {
+                if (roomId != null && entry != null) {
+                    String payload = String.format(
+                            "{\"id\":%d,\"ts\":%d,\"message\":\"%s\"}",
+                            entry.id(),
+                            entry.ts(),
+                            SimpleJson.escape(entry.message())
+                    );
+                    broadcastToRoom(roomId, new GameMessage("TIMELINE_APPENDED", "SERVER", roomId, 0, payload));
+                }
+            });
+        }
         this.heartbeatScheduler = Executors.newSingleThreadScheduledExecutor(r -> {
             Thread t = new Thread(r, "monopoly-ws-heartbeat");
             t.setDaemon(true);
@@ -147,7 +160,8 @@ public class WebSocketStompBroker {
                 roomManagerService.getHostUserId(roomId),
                 roomManagerService.getTurnDeadlineEpochMs(roomId),
                 roomManagerService.getRoomLogs(roomId),
-                roomManagerService.getTurnTimeoutSeconds()
+                roomManagerService.getTurnTimeoutSeconds(),
+                roomManagerService.getRoomTimeline(roomId)
         );
         broadcastToRoom(roomId, snapshot);
     }
@@ -554,7 +568,8 @@ public class WebSocketStompBroker {
                             roomManagerService.getHostUserId(roomId),
                             roomManagerService.getTurnDeadlineEpochMs(roomId),
                             roomManagerService.getRoomLogs(roomId),
-                            roomManagerService.getTurnTimeoutSeconds()
+                            roomManagerService.getTurnTimeoutSeconds(),
+                            roomManagerService.getRoomTimeline(roomId)
                     );
                     sendStompMessage(entry, SimpleJson.toJson(snapshot));
                 }
@@ -697,12 +712,13 @@ public class WebSocketStompBroker {
                 int total = SimpleJson.getInt(payloadMap, "total", d1 + d2);
                 int newPos = SimpleJson.getInt(payloadMap, "newPosition", 0);
                 String code = SimpleJson.getString(payloadMap, "code");
+                String tileName = resolveTileName(roomId, newPos);
                 String suffix = "THREE_DOUBLES".equals(code)
                         ? " (Gieo đôi 3 lần -> Vào tù!)"
-                        : " -> Ô #" + newPos;
+                        : (" -> Ô #" + newPos + (tileName.isEmpty() ? "" : " " + tileName));
                 roomManagerService.appendRoomLog(
                         roomId,
-                        String.format("%s gieo được %d + %d = %d%s", actorName, d1, d2, total, suffix)
+                        String.format(Locale.US, "%s gieo được %d + %d = %d%s", actorName, d1, d2, total, suffix)
                 );
                 if ("GAME_FINISHED".equals(code)) {
                     roomManagerService.appendRoomLog(roomId, "Ván đấu đã kết thúc!");
@@ -715,7 +731,7 @@ public class WebSocketStompBroker {
                 int price = SimpleJson.getInt(payloadMap, "price", 0);
                 roomManagerService.appendRoomLog(
                         roomId,
-                        String.format("%s đã mua %s với giá $%d.",
+                        String.format(Locale.US, "%s đã mua %s với giá $%,d.",
                                 actorName,
                                 tileName != null ? tileName : "tài sản",
                                 price)
@@ -731,7 +747,7 @@ public class WebSocketStompBroker {
                 String levelLabel = hasHotel ? "khách sạn" : ("nhà cấp " + houseCount);
                 roomManagerService.appendRoomLog(
                         roomId,
-                        String.format("%s đã nâng cấp %s lên %s ($%d).",
+                        String.format(Locale.US, "%s đã nâng cấp %s lên %s ($%,d).",
                                 actorName,
                                 tileName != null ? tileName : "ô đất",
                                 levelLabel,
@@ -755,9 +771,10 @@ public class WebSocketStompBroker {
             case "BAIL_PAID" -> {
                 String playerId = SimpleJson.getString(payloadMap, "playerId");
                 String actorName = resolvePlayerName(roomId, playerId != null ? playerId : result.getSenderId());
+                int amount = SimpleJson.getInt(payloadMap, "amount", 50_000);
                 roomManagerService.appendRoomLog(
                         roomId,
-                        actorName + " đã nộp $50 bảo lãnh ra tù."
+                        String.format(Locale.US, "%s đã nộp $%,d bảo lãnh ra tù.", actorName, amount)
                 );
             }
             case "TURN_CHANGED" -> {
@@ -784,6 +801,22 @@ public class WebSocketStompBroker {
             default -> {
             }
         }
+    }
+
+    private String resolveTileName(String roomId, int tileIndex) {
+        if (roomId == null || tileIndex < 0) {
+            return "";
+        }
+        GameRoom room = roomManagerService.getRoom(roomId);
+        if (room != null) {
+            synchronized (room) {
+                model.tile.Tile t = room.getBoard().getTile(tileIndex);
+                if (t != null && t.getName() != null) {
+                    return t.getName();
+                }
+            }
+        }
+        return "";
     }
 
     private String resolvePlayerName(String roomId, String playerId) {

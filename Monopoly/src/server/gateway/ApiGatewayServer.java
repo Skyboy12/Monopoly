@@ -200,15 +200,23 @@ public class ApiGatewayServer {
 
     private void registerEngineSnapshotHook() {
         roomManagerService.setGlobalEngineEventListener((room, event) -> {
-            if (room == null || event == null || WebSocketStompBroker.isDirectCommandInProgress()) {
+            if (room == null || event == null) {
                 return;
             }
             GameEngine.EngineEvent.Type type = event.getType();
+            Map<String, String> data = event.getData();
+            boolean isAutoShield = (type == GameEngine.EngineEvent.Type.ITEM_USED
+                    && "true".equalsIgnoreCase(data.get("auto")));
+            boolean isSpecialEvent = (type == GameEngine.EngineEvent.Type.SPECIAL_EVENT_TRIGGERED);
+            if (WebSocketStompBroker.isDirectCommandInProgress() && !isAutoShield && !isSpecialEvent) {
+                return;
+            }
             if (type != GameEngine.EngineEvent.Type.TURN_TIMED_OUT
                     && type != GameEngine.EngineEvent.Type.BOT_TAKEOVER
                     && type != GameEngine.EngineEvent.Type.DICE_ROLLED
                     && type != GameEngine.EngineEvent.Type.PROPERTY_BOUGHT
                     && type != GameEngine.EngineEvent.Type.PROPERTY_UPGRADED
+                    && type != GameEngine.EngineEvent.Type.ITEM_USED
                     && type != GameEngine.EngineEvent.Type.BAIL_PAID
                     && type != GameEngine.EngineEvent.Type.SPECIAL_EVENT_TRIGGERED
                     && type != GameEngine.EngineEvent.Type.EXTRA_ROLL_GRANTED
@@ -225,7 +233,6 @@ public class ApiGatewayServer {
             String roomId = room.getId();
             String playerId = event.getPlayerId() != null ? event.getPlayerId() : "";
             int turnId = event.getTurnId();
-            Map<String, String> data = event.getData();
             String actorName = resolveRoomPlayerName(room, playerId);
 
             pool.execute(() -> {
@@ -259,6 +266,10 @@ public class ApiGatewayServer {
                         }
                     }
                     case BOT_TAKEOVER -> {
+                        roomManagerService.appendRoomLog(
+                                roomId,
+                                "[Bot] Tiếp quản lượt của " + actorName + "."
+                        );
                         GameEngine engine = roomManagerService.getEngine(roomId);
                         String actionPhase = (engine != null) ? engine.getEffectivePhase().name() : "AWAITING_ROLL";
                         String payload = String.format(
@@ -276,7 +287,10 @@ public class ApiGatewayServer {
                         int d1 = parseIntSafe(data.get("dice1"), 0);
                         int d2 = parseIntSafe(data.get("dice2"), 0);
                         int total = parseIntSafe(data.get("total"), d1 + d2);
-                        int newPosition = 0;
+                        int fromPosition = parseIntSafe(data.get("fromPosition"), 0);
+                        int newPosition = parseIntSafe(data.get("newPosition"), 0);
+                        int finalPosition = newPosition;
+                        String landingTileName = "";
                         GameEngine engine = roomManagerService.getEngine(roomId);
                         // Lấy phase ngoài synchronized (room) để tránh đảo ngược thứ tự khóa engine -> room.
                         String enginePhase = (engine != null) ? engine.getEffectivePhase().name() : "AWAITING_DECISION";
@@ -284,7 +298,11 @@ public class ApiGatewayServer {
                         synchronized (room) {
                             Player p = findPlayerInRoom(room, playerId);
                             if (p != null) {
-                                newPosition = p.getPosition();
+                                finalPosition = p.getPosition();
+                            }
+                            model.tile.Tile landedTile = room.getBoard().getTile(newPosition);
+                            if (landedTile != null && landedTile.getName() != null) {
+                                landingTileName = landedTile.getName();
                             }
                             if (room.getTurnId() == turnId) {
                                 phase = enginePhase;
@@ -292,12 +310,13 @@ public class ApiGatewayServer {
                         }
                         roomManagerService.appendRoomLog(
                                 roomId,
-                                String.format("[Bot] %s gieo được %d + %d = %d -> Ô #%d",
-                                        actorName, d1, d2, total, newPosition)
+                                String.format(Locale.US, "[Bot] %s gieo được %d + %d = %d -> Ô #%d%s",
+                                        actorName, d1, d2, total, newPosition,
+                                        landingTileName.isEmpty() ? "" : (" " + landingTileName))
                         );
                         String payload = String.format(
-                                "{\"bot\":true,\"code\":\"BOT_ROLL\",\"dice1\":%d,\"dice2\":%d,\"total\":%d,\"newPosition\":%d,\"phase\":\"%s\",\"currentTurnId\":%d}",
-                                d1, d2, total, newPosition, SimpleJson.escape(phase), turnId
+                                "{\"bot\":true,\"code\":\"BOT_ROLL\",\"playerId\":\"%s\",\"dice1\":%d,\"dice2\":%d,\"total\":%d,\"fromPosition\":%d,\"newPosition\":%d,\"finalPosition\":%d,\"phase\":\"%s\",\"currentTurnId\":%d}",
+                                SimpleJson.escape(playerId), d1, d2, total, fromPosition, newPosition, finalPosition, SimpleJson.escape(phase), turnId
                         );
                         stompBroker.broadcastToRoom(roomId, new GameMessage(
                                 "DICE_ROLLED", playerId, roomId, turnId, payload
@@ -308,7 +327,7 @@ public class ApiGatewayServer {
                         int price = parseIntSafe(data.get("price"), 0);
                         roomManagerService.appendRoomLog(
                                 roomId,
-                                String.format("[Bot] %s đã mua %s với giá $%d.", actorName, tileName, price)
+                                String.format(Locale.US, "[Bot] %s đã mua %s với giá $%,d.", actorName, tileName, price)
                         );
                         String payload = String.format(
                                 "{\"bot\":true,\"ownerId\":\"%s\",\"tileName\":\"%s\",\"price\":%d}",
@@ -329,10 +348,11 @@ public class ApiGatewayServer {
                         String levelLabel = hasHotel ? "khách sạn" : ("nhà cấp " + houseCount);
                         roomManagerService.appendRoomLog(
                                 roomId,
-                                String.format("%s đã nâng cấp %s lên %s ($%d).", actorName, tileName, levelLabel, cost)
+                                String.format(Locale.US, "[Bot] %s đã nâng cấp %s lên %s ($%,d).",
+                                        actorName, tileName, levelLabel, cost)
                         );
                         String payload = String.format(
-                                "{\"tileIndex\":%d,\"tileName\":\"%s\",\"cost\":%d,\"ownerId\":\"%s\",\"houseCount\":%d,\"hasHotel\":%b}",
+                                "{\"bot\":true,\"tileIndex\":%d,\"tileName\":\"%s\",\"cost\":%d,\"ownerId\":\"%s\",\"houseCount\":%d,\"hasHotel\":%b}",
                                 tileIndex,
                                 SimpleJson.escape(tileName),
                                 cost,
@@ -345,14 +365,64 @@ public class ApiGatewayServer {
                         ));
                         stompBroker.broadcastRoomSnapshot(roomId);
                     }
+                    case ITEM_USED -> {
+                        String itemId = data.getOrDefault("itemId", "");
+                        String itemName = data.getOrDefault("itemName", itemId);
+                        boolean auto = "true".equalsIgnoreCase(data.get("auto"));
+                        String targetPlayerId = data.get("targetPlayerId");
+                        Integer targetTileIndex = data.containsKey("targetTileIndex")
+                                ? parseIntSafe(data.get("targetTileIndex"), -1) : null;
+                        Integer desiredDiceValue = data.containsKey("desiredDiceValue")
+                                ? parseIntSafe(data.get("desiredDiceValue"), -1) : null;
+                        Integer tileIndex = data.containsKey("tileIndex")
+                                ? parseIntSafe(data.get("tileIndex"), -1) : null;
+
+                        if (auto) {
+                            String shieldTileName = "ô đất";
+                            if (tileIndex != null && tileIndex >= 0) {
+                                synchronized (room) {
+                                    model.tile.Tile t = room.getBoard().getTile(tileIndex);
+                                    if (t != null && t.getName() != null && !t.getName().isBlank()) {
+                                        shieldTileName = t.getName();
+                                    }
+                                }
+                            }
+                            roomManagerService.appendRoomLog(
+                                    roomId,
+                                    String.format("%s tự động kích hoạt %s, miễn tiền thuê tại %s.",
+                                            actorName, itemName, shieldTileName)
+                            );
+                        } else {
+                            roomManagerService.appendRoomLog(
+                                    roomId,
+                                    String.format("[Bot] %s đã kích hoạt vật phẩm %s.", actorName, itemName)
+                            );
+                        }
+
+                        java.util.Map<String, Object> payloadMap = new java.util.LinkedHashMap<>();
+                        payloadMap.put("itemId", itemId);
+                        payloadMap.put("itemName", itemName);
+                        payloadMap.put("actorId", playerId);
+                        payloadMap.put("auto", auto);
+                        payloadMap.put("targetPlayerId", targetPlayerId);
+                        payloadMap.put("targetTileIndex", targetTileIndex);
+                        payloadMap.put("desiredDiceValue", desiredDiceValue);
+                        payloadMap.put("tileIndex", tileIndex);
+                        payloadMap.put("bot", !auto);
+                        stompBroker.broadcastToRoom(roomId, new GameMessage(
+                                "ITEM_USED", playerId, roomId, turnId, SimpleJson.stringify(payloadMap)
+                        ));
+                    }
                     case BAIL_PAID -> {
+                        int amount = parseIntSafe(data.get("amount"), model.Player.BAIL_AMOUNT);
                         roomManagerService.appendRoomLog(
                                 roomId,
-                                actorName + " đã nộp $50 bảo lãnh ra tù."
+                                String.format(Locale.US, "[Bot] %s đã nộp $%,d bảo lãnh ra tù.", actorName, amount)
                         );
                         String payload = String.format(
-                                "{\"playerId\":\"%s\",\"amount\":50}",
-                                SimpleJson.escape(playerId)
+                                "{\"bot\":true,\"playerId\":\"%s\",\"amount\":%d}",
+                                SimpleJson.escape(playerId),
+                                amount
                         );
                         stompBroker.broadcastToRoom(roomId, new GameMessage(
                                 "BAIL_PAID", playerId, roomId, turnId, payload
@@ -412,7 +482,7 @@ public class ApiGatewayServer {
                         String nextName = resolveRoomPlayerName(room, nextPlayerId);
                         roomManagerService.appendRoomLog(
                                 roomId,
-                                String.format("Chuyển lượt sang %s (Turn #%d).", nextName, nextTurnId)
+                                String.format("[Bot] Chuyển lượt sang %s (Turn #%d).", nextName, nextTurnId)
                         );
                         GameEngine engine = roomManagerService.getEngine(roomId);
                         String phase = (engine != null) ? engine.getEffectivePhase().name() : "AWAITING_ROLL";
@@ -683,9 +753,10 @@ public class ApiGatewayServer {
                     Integer parsedMax = SimpleJson.getInteger(body, "maxPlayers");
                     maxPlayers = (parsedMax != null) ? parsedMax : -1;
                 }
+                int botCount = SimpleJson.getInt(body, "botCount", 0);
                 String hostDisplayName = resolveDisplayName(hostUserId, authHeader, null);
 
-                GameMessage res = roomController.createRoom(roomName, maxPlayers, hostUserId, hostDisplayName);
+                GameMessage res = roomController.createRoom(roomName, maxPlayers, hostUserId, hostDisplayName, botCount);
                 int status = "ERROR".equals(res.getType()) ? HttpResponseWriter.mapErrorStatus(res) : 201;
                 HttpResponseWriter.writeGameMessage(out, status, res, keepAlive);
                 return;
@@ -754,7 +825,8 @@ public class ApiGatewayServer {
                     roomManagerService.getHostUserId(roomId),
                     roomManagerService.getTurnDeadlineEpochMs(roomId),
                     roomManagerService.getRoomLogs(roomId),
-                    roomManagerService.getTurnTimeoutSeconds()
+                    roomManagerService.getTurnTimeoutSeconds(),
+                    roomManagerService.getRoomTimeline(roomId)
             );
             HttpResponseWriter.writeGameMessage(out, 200, snapshot, keepAlive);
             return;

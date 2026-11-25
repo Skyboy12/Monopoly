@@ -19,6 +19,8 @@ import java.util.List;
  * Mọi biến động tài sản/trạng thái phải thông qua các method nghiệp vụ xác thực.
  */
 public class Player {
+    public static final int BAIL_AMOUNT = 50_000;
+
     private final String id;
     private final String name;
     private int money;
@@ -241,7 +243,7 @@ public class Player {
                 lapsPassed--;
             }
             if (lapsPassed > 0) {
-                addMoney(200 * lapsPassed);
+                addMoney(200_000 * lapsPassed);
             }
         }
     }
@@ -253,7 +255,7 @@ public class Player {
     }
 
     public synchronized boolean payBail() {
-        if (this.status == PlayerStatus.IN_JAIL && deductMoney(50)) {
+        if (this.status == PlayerStatus.IN_JAIL && deductMoney(BAIL_AMOUNT)) {
             this.status = PlayerStatus.ACTIVE;
             this.turnsInJail = 0;
             return true;

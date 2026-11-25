@@ -16,7 +16,7 @@ import java.util.UUID;
  * Controller xử lý các REST API quản lý phòng chờ và sảnh game (Lobby Management).
  */
 public class RoomRestController {
-    private static final int DEFAULT_INITIAL_MONEY = 1500;
+    private static final int DEFAULT_INITIAL_MONEY = 1_500_000;
     private final RoomManagerService roomManagerService;
 
     public RoomRestController(RoomManagerService roomManagerService) {
@@ -51,6 +51,13 @@ public class RoomRestController {
      * API 2 (Overload): Tạo phòng chơi mới với tên hiển thị của Host.
      */
     public GameMessage createRoom(String roomName, int maxPlayers, String hostUserId, String hostDisplayName) {
+        return createRoom(roomName, maxPlayers, hostUserId, hostDisplayName, 0);
+    }
+
+    /**
+     * API 2 (Overload): Tạo phòng chơi mới với tên hiển thị của Host và số lượng Bot.
+     */
+    public GameMessage createRoom(String roomName, int maxPlayers, String hostUserId, String hostDisplayName, int botCount) {
         if (hostUserId == null || hostUserId.isBlank()) {
             return errorMessage(null, null, 0, "UNAUTHORIZED", "Thiếu thông tin người tạo phòng.");
         }
@@ -70,6 +77,13 @@ public class RoomRestController {
                 : hostDisplayName.trim();
         Player hostPlayer = new Player(hostUserId, displayName, DEFAULT_INITIAL_MONEY);
         room.addPlayer(hostPlayer);
+
+        int validBotCount = Math.max(0, Math.min(maxPlayers - 1, botCount));
+        for (int i = 1; i <= validBotCount; i++) {
+            Player bot = new Player("bot-" + roomId + "-" + i, "Bot #" + i, DEFAULT_INITIAL_MONEY);
+            bot.setBot(true);
+            room.addPlayer(bot);
+        }
 
         return new GameMessage(
                 "ROOM_CREATED",

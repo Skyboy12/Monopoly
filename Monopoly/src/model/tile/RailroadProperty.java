@@ -10,9 +10,18 @@ import model.GameRoom;
  * (Ví dụ: 1 ga: $25, 2 ga: $50, 3 ga: $100, 4 ga: $200).
  */
 public class RailroadProperty extends PropertyTile {
+    public static final int BASE_RENT = 25_000;
 
     public RailroadProperty(int index, String name, int price) {
         super(index, name, price);
+    }
+
+    public static int rentForCount(int ownedCount) {
+        if (ownedCount <= 0) {
+            return 0;
+        }
+        int clamped = Math.min(ownedCount, 4);
+        return BASE_RENT * (1 << (clamped - 1));
     }
 
     @Override
@@ -23,11 +32,6 @@ public class RailroadProperty extends PropertyTile {
 
         // Gọi hàm getRailroadCount() đã được đóng gói trong Player
         int ownedCount = getOwner().getRailroadCount();
-        if (ownedCount <= 0) {
-            return 0;
-        }
-
-        // Công thức lũy tiến: 25 * 2^(n - 1)
-        return 25 * (1 << (ownedCount - 1));
+        return rentForCount(ownedCount);
     }
 }

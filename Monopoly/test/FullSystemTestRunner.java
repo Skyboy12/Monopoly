@@ -158,6 +158,10 @@ public class FullSystemTestRunner {
                 this::testSuiteE_TimeoutInAwaitingDecisionAndEnsureBotResolved);
         runTest("Suite E", "Dedicated player.isBot() auto-plays without 30s wait or BOT_ALREADY_ACTIVE",
                 this::testSuiteE_DedicatedBotAutoPlaysWithoutWaiting30s);
+        runTest("Suite E", "Timeline monotonic id/ts, TIMELINE_APPENDED, Asia/Ho_Chi_Minh logs, rentTable & Bot newPosition",
+                this::testSuiteE_TimelineRentTableAndBotPositionSync);
+        runTest("Suite E", "Auto RENT_SHIELD -> ITEM_USED auto=true STOMP broadcast + exactly one log line",
+                this::testSuiteE_AutoRentShieldStompAndSingleLog);
 
         printSummaryAndExit();
     }
@@ -206,11 +210,11 @@ public class FullSystemTestRunner {
     // =========================================================================
 
     private void testPlayerEncapsulationMoneyJailBankruptcy() {
-        Player p1 = new Player("u1", "Người chơi 1", 1500);
-        Player p2 = new Player("u2", "Người chơi 2", 1000);
+        Player p1 = new Player("u1", "Người chơi 1", 1_500_000);
+        Player p2 = new Player("u2", "Người chơi 2", 1_000_000);
 
         assertEquals(0, p1.getPosition(), "Initial position");
-        assertEquals(1500, p1.getMoney(), "Initial money");
+        assertEquals(1_500_000, p1.getMoney(), "Initial money");
         assertEquals(PlayerStatus.ACTIVE, p1.getStatus(), "Initial status");
         assertEquals(5, p1.getInventory().getMaxCapacity(), "Default inventory capacity");
 
@@ -219,45 +223,45 @@ public class FullSystemTestRunner {
         p1.setPosition(43);
         assertEquals(3, p1.getPosition(), "Position >= 40 wraps modulo 40");
 
-        p1.addMoney(-100);
-        assertEquals(1500, p1.getMoney(), "Negative addMoney ignored");
-        p1.addMoney(250);
-        assertEquals(1750, p1.getMoney(), "Positive addMoney applied");
+        p1.addMoney(-100_000);
+        assertEquals(1_500_000, p1.getMoney(), "Negative addMoney ignored");
+        p1.addMoney(250_000);
+        assertEquals(1_750_000, p1.getMoney(), "Positive addMoney applied");
 
         assertFalse(p1.deductMoney(0), "Zero deduct returns false");
-        assertFalse(p1.deductMoney(5000), "Insufficient deduct returns false");
-        assertEquals(1750, p1.getMoney(), "Money unchanged on failed deduct");
-        assertTrue(p1.deductMoney(250), "Valid deduct returns true");
-        assertEquals(1500, p1.getMoney(), "Money reduced after deduct");
+        assertFalse(p1.deductMoney(5_000_000), "Insufficient deduct returns false");
+        assertEquals(1_750_000, p1.getMoney(), "Money unchanged on failed deduct");
+        assertTrue(p1.deductMoney(250_000), "Valid deduct returns true");
+        assertEquals(1_500_000, p1.getMoney(), "Money reduced after deduct");
 
-        assertFalse(p1.pay(2000, p2), "Insufficient pay fails");
-        assertEquals(1000, p2.getMoney(), "Receiver unchanged on failed pay");
-        assertTrue(p1.pay(300, p2), "Valid pay succeeds");
-        assertEquals(1200, p1.getMoney(), "Payer balance after pay");
-        assertEquals(1300, p2.getMoney(), "Receiver balance after pay");
+        assertFalse(p1.pay(2_000_000, p2), "Insufficient pay fails");
+        assertEquals(1_000_000, p2.getMoney(), "Receiver unchanged on failed pay");
+        assertTrue(p1.pay(300_000, p2), "Valid pay succeeds");
+        assertEquals(1_200_000, p1.getMoney(), "Payer balance after pay");
+        assertEquals(1_300_000, p2.getMoney(), "Receiver balance after pay");
 
-        // Move across GO while ACTIVE grants +$200
+        // Move across GO while ACTIVE grants +$200,000
         p1.setPosition(35);
         p1.move(7);
         assertEquals(2, p1.getPosition(), "Position after move across GO");
-        assertEquals(1400, p1.getMoney(), "Passed GO bonus +$200");
+        assertEquals(1_400_000, p1.getMoney(), "Passed GO bonus +$200,000");
 
         // Jail & bail
         p1.sendToJail(10);
         assertEquals(10, p1.getPosition(), "Jail position");
         assertEquals(PlayerStatus.IN_JAIL, p1.getStatus(), "Status IN_JAIL");
         p1.setPosition(38);
-        p1.move(4); // Crossing GO while IN_JAIL must NOT award $200
-        assertEquals(1400, p1.getMoney(), "No GO bonus while IN_JAIL");
+        p1.move(4); // Crossing GO while IN_JAIL must NOT award $200,000
+        assertEquals(1_400_000, p1.getMoney(), "No GO bonus while IN_JAIL");
 
-        assertTrue(p1.payBail(), "Pay bail $50 succeeds");
+        assertTrue(p1.payBail(), "Pay bail $50,000 succeeds");
         assertEquals(PlayerStatus.ACTIVE, p1.getStatus(), "Active after bail");
-        assertEquals(1350, p1.getMoney(), "Money after $50 bail");
+        assertEquals(1_350_000, p1.getMoney(), "Money after $50,000 bail");
         assertFalse(p1.payBail(), "Pay bail when ACTIVE returns false");
 
         // Buy, transfer & bankruptcy
-        StreetProperty street1 = new StreetProperty(1, "Phố Huế", 60, "BROWN", 10);
-        StreetProperty street2 = new StreetProperty(3, "Hàng Bài", 80, "BROWN", 12);
+        StreetProperty street1 = new StreetProperty(1, "Phố Huế", 60_000, "BROWN", 10_000);
+        StreetProperty street2 = new StreetProperty(3, "Hàng Bài", 80_000, "BROWN", 12_000);
         p1.buyProperty(street1);
         p1.buyProperty(street2);
         assertEquals(p1, street1.getOwner(), "p1 owns street1");
@@ -292,23 +296,23 @@ public class FullSystemTestRunner {
         assertEquals(39, board.getTile(-1).getIndex(), "Tile -1 wraps to 39");
 
         GameRoom room = new GameRoom("r1", "Test", 2);
-        Player p = new Player("p1", "Tester", 500);
+        Player p = new Player("p1", "Tester", 500_000);
         room.addPlayer(p);
 
         Tile go = board.getTile(0);
         assertTrue(go instanceof GoTile, "Tile 0 is GoTile");
         go.onLand(p, room);
-        assertEquals(700, p.getMoney(), "GoTile awards $200");
+        assertEquals(700_000, p.getMoney(), "GoTile awards $200,000");
 
         Tile parking = board.getTile(20);
         assertTrue(parking instanceof FreeParkingTile, "Tile 20 is FreeParkingTile");
         parking.onLand(p, room);
-        assertEquals(700, p.getMoney(), "FreeParkingTile keeps money unchanged");
+        assertEquals(700_000, p.getMoney(), "FreeParkingTile keeps money unchanged");
 
         Tile tax = board.getTile(4);
         assertTrue(tax instanceof TaxTile, "Tile 4 is TaxTile");
         tax.onLand(p, room);
-        assertEquals(500, p.getMoney(), "TaxTile deducts $200");
+        assertEquals(500_000, p.getMoney(), "TaxTile deducts $200,000");
 
         Tile goToJail = board.getTile(30);
         assertTrue(goToJail instanceof GoToJailTile, "Tile 30 is GoToJailTile");
@@ -316,71 +320,71 @@ public class FullSystemTestRunner {
         goToJail.onLand(p, room);
         assertEquals(10, p.getPosition(), "GoToJail sends player to index 10");
         assertEquals(PlayerStatus.IN_JAIL, p.getStatus(), "GoToJail sets IN_JAIL");
-        assertEquals(500, p.getMoney(), "GoToJail does NOT grant GO money");
+        assertEquals(500_000, p.getMoney(), "GoToJail does NOT grant GO money");
 
         Tile jail = board.getTile(10);
         assertTrue(jail instanceof JailTile, "Tile 10 is JailTile");
-        // 3 turns in jail triggers mandatory $50 bail
+        // 3 turns in jail triggers mandatory $50,000 bail
         jail.onLand(p, room);
         assertEquals(PlayerStatus.IN_JAIL, p.getStatus(), "Still in jail after turn 1");
         jail.onLand(p, room);
         assertEquals(PlayerStatus.IN_JAIL, p.getStatus(), "Still in jail after turn 2");
         jail.onLand(p, room);
         assertEquals(PlayerStatus.ACTIVE, p.getStatus(), "Released on 3rd turn via bail");
-        assertEquals(450, p.getMoney(), "$50 bail deducted on 3rd jail turn");
+        assertEquals(450_000, p.getMoney(), "$50,000 bail deducted on 3rd jail turn");
 
         // Just visiting when ACTIVE
         jail.onLand(p, room);
         assertEquals(PlayerStatus.ACTIVE, p.getStatus(), "Just Visiting stays ACTIVE");
-        assertEquals(450, p.getMoney(), "Just Visiting costs $0");
+        assertEquals(450_000, p.getMoney(), "Just Visiting costs $0");
 
         // Tax bankruptcy
-        Player broke = new Player("broke", "Broke", 50);
+        Player broke = new Player("broke", "Broke", 50_000);
         tax.onLand(broke, room);
         assertEquals(PlayerStatus.BANKRUPT, broke.getStatus(), "Tax > cash causes BANKRUPT");
     }
 
     private void testPropertyRentAndModifiers() {
         GameRoom room = new GameRoom("r-rent", "Rent Room", 2);
-        Player owner = new Player("owner", "Owner", 5000);
-        Player guest = new Player("guest", "Guest", 2000);
+        Player owner = new Player("owner", "Owner", 5_000_000);
+        Player guest = new Player("guest", "Guest", 2_000_000);
         room.addPlayer(owner);
         room.addPlayer(guest);
 
         // StreetProperty rent progression
-        StreetProperty street = new StreetProperty(1, "Street", 100, "BROWN", 10);
+        StreetProperty street = new StreetProperty(1, "Street", 100_000, "BROWN", 10_000);
         assertEquals(0, street.calculateRent(room), "Unowned street rent = 0");
         owner.buyProperty(street);
-        assertEquals(10, street.calculateRent(room), "Base street rent");
+        assertEquals(10_000, street.calculateRent(room), "Base street rent");
         street.setHouseCount(2);
-        assertEquals(50, street.calculateRent(room), "2 houses rent = base * (1 + 2*2) = 50");
+        assertEquals(50_000, street.calculateRent(room), "2 houses rent = base * (1 + 2*2) = 50,000");
         street.setHasHotel(true);
-        assertEquals(100, street.calculateRent(room), "Hotel rent = base * 10 = 100");
+        assertEquals(100_000, street.calculateRent(room), "Hotel rent = base * 10 = 100,000");
 
         // RailroadProperty rent progression
-        RailroadProperty rr1 = new RailroadProperty(5, "RR1", 200);
-        RailroadProperty rr2 = new RailroadProperty(15, "RR2", 200);
-        RailroadProperty rr3 = new RailroadProperty(25, "RR3", 200);
-        RailroadProperty rr4 = new RailroadProperty(35, "RR4", 200);
+        RailroadProperty rr1 = new RailroadProperty(5, "RR1", 200_000);
+        RailroadProperty rr2 = new RailroadProperty(15, "RR2", 200_000);
+        RailroadProperty rr3 = new RailroadProperty(25, "RR3", 200_000);
+        RailroadProperty rr4 = new RailroadProperty(35, "RR4", 200_000);
         owner.buyProperty(rr1);
-        assertEquals(25, rr1.calculateRent(room), "1 railroad rent = 25");
+        assertEquals(25_000, rr1.calculateRent(room), "1 railroad rent = 25,000");
         owner.buyProperty(rr2);
-        assertEquals(50, rr1.calculateRent(room), "2 railroads rent = 50");
+        assertEquals(50_000, rr1.calculateRent(room), "2 railroads rent = 50,000");
         owner.buyProperty(rr3);
-        assertEquals(100, rr1.calculateRent(room), "3 railroads rent = 100");
+        assertEquals(100_000, rr1.calculateRent(room), "3 railroads rent = 100,000");
         owner.buyProperty(rr4);
-        assertEquals(200, rr1.calculateRent(room), "4 railroads rent = 200");
+        assertEquals(200_000, rr1.calculateRent(room), "4 railroads rent = 200,000");
 
         // UtilityProperty rent calculation
-        UtilityProperty u1 = new UtilityProperty(12, "Electric", 150);
-        UtilityProperty u2 = new UtilityProperty(28, "Water", 150);
+        UtilityProperty u1 = new UtilityProperty(12, "Electric", 150_000);
+        UtilityProperty u2 = new UtilityProperty(28, "Water", 150_000);
         owner.buyProperty(u1);
         Dice d = new Dice();
         d.roll();
         room.setLastDice(d);
-        assertEquals(d.getTotal() * 4, u1.calculateRent(room), "1 utility rent = dice * 4");
+        assertEquals(d.getTotal() * 4_000, u1.calculateRent(room), "1 utility rent = dice * 4,000");
         owner.buyProperty(u2);
-        assertEquals(d.getTotal() * 10, u1.calculateRent(room), "2 utilities rent = dice * 10");
+        assertEquals(d.getTotal() * 10_000, u1.calculateRent(room), "2 utilities rent = dice * 10,000");
 
         // PropertyTile.onLand modifiers: shield, frozen, mortgaged, multiplier, bankruptcy
         int guestBefore = guest.getMoney();
@@ -402,12 +406,12 @@ public class FullSystemTestRunner {
 
         room.setRentMultiplier(3);
         street.onLand(guest, room);
-        assertEquals(guestBefore - 300, guest.getMoney(), "3x multiplier rent deducted from guest");
-        assertEquals(ownerBefore + 300, owner.getMoney(), "3x multiplier rent credited to owner");
+        assertEquals(guestBefore - 300_000, guest.getMoney(), "3x multiplier rent deducted from guest");
+        assertEquals(ownerBefore + 300_000, owner.getMoney(), "3x multiplier rent credited to owner");
         room.setRentMultiplier(1);
 
         // Insufficient rent triggers bankruptcy to owner
-        Player poor = new Player("poor", "Poor", 50);
+        Player poor = new Player("poor", "Poor", 50_000);
         street.onLand(poor, room);
         assertEquals(PlayerStatus.BANKRUPT, poor.getStatus(), "Insufficient rent causes bankruptcy");
     }
@@ -434,8 +438,8 @@ public class FullSystemTestRunner {
         assertNull(inv.removeItem("NON_EXISTENT"), "remove unknown returns null");
 
         GameRoom room = new GameRoom("r-items", "Item Room", 2);
-        Player u1 = new Player("u1", "User1", 1000);
-        Player u2 = new Player("u2", "User2", 2000);
+        Player u1 = new Player("u1", "User1", 1_000_000);
+        Player u2 = new Player("u2", "User2", 2_000_000);
         room.addPlayer(u1);
         room.addPlayer(u2);
 
@@ -454,7 +458,7 @@ public class FullSystemTestRunner {
         assertTrue(shield.applyEffect(u1, room, new ItemTargetContext()), "RentShield applied on opponent tile");
         assertTrue(u1.isRentShieldActive(), "RentShield flag active");
         u2Prop.onLand(u1, room);
-        assertEquals(1000, u1.getMoney(), "RentShield blocks rent");
+        assertEquals(1_000_000, u1.getMoney(), "RentShield blocks rent");
 
         assertTrue(dynamite.applyEffect(u1, room, new ItemTargetContext(null, 3, null)), "Dynamite applied");
         assertEquals(0, u2Prop.getHouseCount(), "Dynamite destroyed houses");
@@ -463,7 +467,7 @@ public class FullSystemTestRunner {
         int u2MoneyBefore = u2.getMoney();
         assertTrue(takeover.applyEffect(u1, room, new ItemTargetContext(null, 3, null)), "HostileTakeover applied");
         assertEquals(u1, u2Prop.getOwner(), "HostileTakeover transferred ownership to u1");
-        assertEquals(1000 - u2Prop.getPrice(), u1.getMoney(), "HostileTakeover deducted price");
+        assertEquals(1_000_000 - u2Prop.getPrice(), u1.getMoney(), "HostileTakeover deducted price");
         assertEquals(u2MoneyBefore + u2Prop.getPrice(), u2.getMoney(), "HostileTakeover paid old owner");
 
         // FortuneSwapItem
@@ -482,23 +486,23 @@ public class FullSystemTestRunner {
 
     private void testGameEventManager() {
         GameRoom room = new GameRoom("r-ev", "Event Room", 2);
-        Player p1 = new Player("p1", "P1", 1000);
-        Player p2 = new Player("p2", "P2", 2000);
+        Player p1 = new Player("p1", "P1", 1_000_000);
+        Player p2 = new Player("p2", "P2", 2_000_000);
         room.addPlayer(p1);
         room.addPlayer(p2);
 
         GameEventManager manager = new GameEventManager();
 
-        // StimulusDayEvent (+500)
+        // StimulusDayEvent (+500,000)
         manager.triggerEvent(new StimulusDayEvent(), room);
-        assertEquals(1500, p1.getMoney(), "StimulusDay +500 p1");
-        assertEquals(2500, p2.getMoney(), "StimulusDay +500 p2");
+        assertEquals(1_500_000, p1.getMoney(), "StimulusDay +500,000 p1");
+        assertEquals(2_500_000, p2.getMoney(), "StimulusDay +500,000 p2");
         assertEquals(0, manager.getActiveEvents().size(), "Instant event not retained");
 
-        // RichTaxEvent (40% of richest 2500 = 1000 -> to p1)
+        // RichTaxEvent (40% of richest 2,500,000 = 1,000,000 -> to p1)
         manager.triggerEvent(new RichTaxEvent(), room);
-        assertEquals(1500, p2.getMoney(), "RichTax deducted 40%");
-        assertEquals(2500, p1.getMoney(), "RichTax transferred to other player");
+        assertEquals(1_500_000, p2.getMoney(), "RichTax deducted 40%");
+        assertEquals(2_500_000, p1.getMoney(), "RichTax transferred to other player");
 
         // EarthquakeEvent
         StreetProperty s1 = (StreetProperty) room.getBoard().getTile(1);
@@ -536,8 +540,8 @@ public class FullSystemTestRunner {
 
     private void testGameEngineValidationAndAntiCheat() {
         GameRoom room = new GameRoom("r-eng", "Engine Room", 2);
-        Player p1 = new Player("p1", "P1", 1500);
-        Player p2 = new Player("p2", "P2", 1500);
+        Player p1 = new Player("p1", "P1", 1_500_000);
+        Player p2 = new Player("p2", "P2", 1_500_000);
         room.addPlayer(p1);
         GameEngine engine = new GameEngine(room);
 
@@ -580,8 +584,8 @@ public class FullSystemTestRunner {
 
     private void testGameEngineConcurrency() throws Exception {
         GameRoom room = new GameRoom("r-conc", "Concurrency Room", 2);
-        Player p1 = new Player("p1", "P1", 1500);
-        Player p2 = new Player("p2", "P2", 1500);
+        Player p1 = new Player("p1", "P1", 1_500_000);
+        Player p2 = new Player("p2", "P2", 1_500_000);
         room.addPlayer(p1);
         room.addPlayer(p2);
         GameEngine engine = new GameEngine(room);
@@ -623,9 +627,9 @@ public class FullSystemTestRunner {
     private void testBotControllerAndTurnTimerService() throws Exception {
         // 1. Direct BotController turn
         GameRoom botRoom = new GameRoom("r-bot", "Bot Room", 2);
-        Player bot = new Player("bot1", "Bot", 2000);
+        Player bot = new Player("bot1", "Bot", 2_000_000);
         bot.setBot(true);
-        Player human = new Player("h1", "Human", 1500);
+        Player human = new Player("h1", "Human", 1_500_000);
         botRoom.addPlayer(bot);
         botRoom.addPlayer(human);
 
@@ -640,8 +644,8 @@ public class FullSystemTestRunner {
         TurnTimerService timerService = new TurnTimerService(scheduler, 1);
         try {
             GameRoom timerRoom = new GameRoom("r-timer", "Timer Room", 2);
-            Player p1 = new Player("p1", "P1", 1500);
-            Player p2 = new Player("p2", "P2", 1500);
+            Player p1 = new Player("p1", "P1", 1_500_000);
+            Player p2 = new Player("p2", "P2", 1_500_000);
             timerRoom.addPlayer(p1);
             timerRoom.addPlayer(p2);
             GameEngine timerEngine = new GameEngine(timerRoom);
@@ -1301,38 +1305,38 @@ public class FullSystemTestRunner {
 
     private void testSuiteE_GoLandingAndNegativeSteps() {
         GameRoom room = new GameRoom("suite-e-go", "GO Room", 2);
-        Player p = new Player("e-go-1", "GO Tester", 1500);
+        Player p = new Player("e-go-1", "GO Tester", 1_500_000);
 
-        // 35 + 5 -> 0: move() must NOT award $200; GoTile.onLand() awards $200 once.
+        // 35 + 5 -> 0: move() must NOT award $200,000; GoTile.onLand() awards $200,000 once.
         p.setPosition(35);
         p.move(5);
         assertEquals(0, p.getPosition(), "35 + 5 wraps to 0");
-        assertEquals(1500, p.getMoney(), "Landing directly on GO does not award $200 inside move()");
+        assertEquals(1_500_000, p.getMoney(), "Landing directly on GO does not award $200,000 inside move()");
         new GoTile(0, "GO").onLand(p, room);
-        assertEquals(1700, p.getMoney(), "Total GO reward on 35+5->0 is $200 (not $400)");
+        assertEquals(1_700_000, p.getMoney(), "Total GO reward on 35+5->0 is $200,000 (not $400,000)");
 
-        // 35 + 7 -> 2: passing GO strictly awards +$200 in move()
+        // 35 + 7 -> 2: passing GO strictly awards +$200,000 in move()
         p.setPosition(35);
         p.move(7);
         assertEquals(2, p.getPosition(), "35 + 7 wraps to 2");
-        assertEquals(1900, p.getMoney(), "Passing GO (35+7->2) awards +$200");
+        assertEquals(1_900_000, p.getMoney(), "Passing GO (35+7->2) awards +$200,000");
 
         // Negative steps must award $0
         p.setPosition(5);
         p.move(-10);
         assertEquals(35, p.getPosition(), "5 - 10 wraps to 35");
-        assertEquals(1900, p.getMoney(), "Negative steps award $0");
+        assertEquals(1_900_000, p.getMoney(), "Negative steps award $0");
 
         // IN_JAIL player moving must not receive GO bonus
         p.sendToJail(10);
         p.move(35);
-        assertEquals(1900, p.getMoney(), "IN_JAIL move awards $0 GO bonus");
+        assertEquals(1_900_000, p.getMoney(), "IN_JAIL move awards $0 GO bonus");
     }
 
     private void testSuiteE_BankruptcyNullResetAndUnmodifiableOwnedProps() {
-        Player p = new Player("e-bk-1", "Bankrupt Tester", 1500);
-        StreetProperty s1 = new StreetProperty(1, "Phố Huế", 60, "BROWN", 10);
-        StreetProperty s2 = new StreetProperty(3, "Hàng Bài", 60, "BROWN", 12);
+        Player p = new Player("e-bk-1", "Bankrupt Tester", 1_500_000);
+        StreetProperty s1 = new StreetProperty(1, "Phố Huế", 60_000, "BROWN", 10_000);
+        StreetProperty s2 = new StreetProperty(3, "Hàng Bài", 60_000, "BROWN", 12_000);
         p.buyProperty(s1);
         p.buyProperty(s2);
 
@@ -1365,10 +1369,10 @@ public class FullSystemTestRunner {
     }
 
     private void testSuiteE_JailMechanicsAndPayBailReclaim() {
-        // 1. Rolling in Jail for 3 turns -> auto-bail ($50) on 3rd turn
+        // 1. Rolling in Jail for 3 turns -> auto-bail ($50,000) on 3rd turn
         GameRoom r1 = new GameRoom("e-jail-1", "Jail Roll Room", 2);
-        Player p1 = new Player("j1", "Prisoner 1", 1500);
-        Player p2 = new Player("j2", "Guard 2", 1500);
+        Player p1 = new Player("j1", "Prisoner 1", 1_500_000);
+        Player p2 = new Player("j2", "Guard 2", 1_500_000);
         r1.addPlayer(p1);
         r1.addPlayer(p2);
         GameEngine e1 = new GameEngine(r1);
@@ -1390,12 +1394,12 @@ public class FullSystemTestRunner {
         r1.setForcedDiceValue(3); // lands on index 13 (StreetProperty, unowned)
         assertTrue(e1.rollDice("e-jail-1", p1.getId(), r1.getTurnId(), "jr-3").isSuccess(), "p1 jail roll 3");
         assertEquals(PlayerStatus.ACTIVE, p1.getStatus(), "p1 auto-bailed on 3rd jail roll");
-        assertEquals(1450, p1.getMoney(), "p1 paid $50 auto-bail on 3rd jail roll");
+        assertEquals(1_450_000, p1.getMoney(), "p1 paid $50,000 auto-bail on 3rd jail roll");
 
-        // 2. Skipping 3 turns in Jail -> auto-bail ($50) on 3rd skip
+        // 2. Skipping 3 turns in Jail -> auto-bail ($50,000) on 3rd skip
         GameRoom r2 = new GameRoom("e-jail-2", "Jail Skip Room", 2);
-        Player s1 = new Player("js1", "Skipper 1", 1500);
-        Player s2 = new Player("js2", "Other 2", 1500);
+        Player s1 = new Player("js1", "Skipper 1", 1_500_000);
+        Player s2 = new Player("js2", "Other 2", 1_500_000);
         r2.addPlayer(s1);
         r2.addPlayer(s2);
         GameEngine e2 = new GameEngine(r2);
@@ -1411,10 +1415,10 @@ public class FullSystemTestRunner {
         }
         assertTrue(e2.endTurn("e-jail-2", s1.getId(), r2.getTurnId(), "skip-3").isSuccess(), "s1 skip 3");
         assertEquals(PlayerStatus.ACTIVE, s1.getStatus(), "s1 auto-bailed on 3rd skip");
-        assertEquals(1450, s1.getMoney(), "s1 paid $50 auto-bail on 3rd skip");
+        assertEquals(1_450_000, s1.getMoney(), "s1 paid $50,000 auto-bail on 3rd skip");
 
-        // 2b. Skipping 3 turns in Jail with < $50 -> BANKRUPT (s2 is current player after s1's 3rd skip)
-        s2.deductMoney(s2.getMoney() - 20);
+        // 2b. Skipping 3 turns in Jail with < $50,000 -> BANKRUPT (s2 is current player after s1's 3rd skip)
+        s2.deductMoney(s2.getMoney() - 20_000);
         s2.sendToJail(10);
         for (int i = 1; i <= 2; i++) {
             assertTrue(e2.endTurn("e-jail-2", s2.getId(), r2.getTurnId(), "s2skip-" + i).isSuccess(), "s2 skip " + i);
@@ -1428,8 +1432,8 @@ public class FullSystemTestRunner {
 
         // 3. Bot in Jail escapes/advances without getting stuck
         GameRoom r3 = new GameRoom("e-jail-3", "Bot Jail Room", 2);
-        Player b1 = new Player("jb1", "Bot Prisoner", 1500);
-        Player b2 = new Player("jb2", "Human Peer", 1500);
+        Player b1 = new Player("jb1", "Bot Prisoner", 1_500_000);
+        Player b2 = new Player("jb2", "Human Peer", 1_500_000);
         b1.setBot(true);
         r3.addPlayer(b1);
         r3.addPlayer(b2);
@@ -1443,8 +1447,8 @@ public class FullSystemTestRunner {
 
         // 4. payBail reclaims human control from TIMEOUT
         GameRoom r4 = new GameRoom("e-jail-4", "Bail Timeout Room", 2);
-        Player h1 = new Player("jh1", "Timed Out Prisoner", 1500);
-        Player h2 = new Player("jh2", "Peer", 1500);
+        Player h1 = new Player("jh1", "Timed Out Prisoner", 1_500_000);
+        Player h2 = new Player("jh2", "Peer", 1_500_000);
         r4.addPlayer(h1);
         r4.addPlayer(h2);
         GameEngine e4 = new GameEngine(r4);
@@ -1457,14 +1461,14 @@ public class FullSystemTestRunner {
         assertTrue(bailRes.isSuccess(), "payBail succeeds during TIMEOUT");
         assertFalse(e4.isBotTurnActive("e-jail-4", h1.getId(), tid), "payBail reclaims human control from TIMEOUT");
         assertEquals(PlayerStatus.ACTIVE, h1.getStatus(), "h1 is ACTIVE after payBail");
-        assertEquals(1450, h1.getMoney(), "h1 paid $50 bail");
+        assertEquals(1_450_000, h1.getMoney(), "h1 paid $50,000 bail");
     }
 
     private void testSuiteE_ConcurrentBotAndHumanNoDeadlock() throws Exception {
         GameRoom room = new GameRoom("e-conc", "Concurrency Room", 2);
-        Player bot = new Player("c-bot", "Bot", 1500);
+        Player bot = new Player("c-bot", "Bot", 1_500_000);
         bot.setBot(true);
-        Player human = new Player("c-hum", "Human", 1500);
+        Player human = new Player("c-hum", "Human", 1_500_000);
         room.addPlayer(bot);
         room.addPlayer(human);
         GameEngine engine = new GameEngine(room);
@@ -1736,8 +1740,8 @@ public class FullSystemTestRunner {
     private void testSuiteE_TimeoutInAwaitingDecisionAndEnsureBotResolved() throws Exception {
         // 1. Engine-level: timeout in AWAITING_DECISION (unowned property & doubles) + ensureBotTurnResolved
         GameRoom room = new GameRoom("e-to-dec", "Timeout Decision Room", 2);
-        Player p1 = new Player("td1", "Human 1", 1500);
-        Player p2 = new Player("td2", "Human 2", 1500);
+        Player p1 = new Player("td1", "Human 1", 1_500_000);
+        Player p2 = new Player("td2", "Human 2", 1_500_000);
         room.addPlayer(p1);
         room.addPlayer(p2);
         GameEngine engine = new GameEngine(room);
@@ -1839,8 +1843,8 @@ public class FullSystemTestRunner {
 
     private void testSuiteE_DedicatedBotAutoPlaysWithoutWaiting30s() throws Exception {
         GameRoom room = new GameRoom("e-ded-bot", "Dedicated Bot Room", 2);
-        Player human = new Player("db-hum", "Human", 1500);
-        Player bot = new Player("db-bot", "AI Bot", 1500);
+        Player human = new Player("db-hum", "Human", 1_500_000);
+        Player bot = new Player("db-bot", "AI Bot", 1_500_000);
         bot.setBot(true);
         room.addPlayer(human);
         room.addPlayer(bot);
@@ -1885,6 +1889,229 @@ public class FullSystemTestRunner {
         } finally {
             scheduler.shutdownNow();
         }
+    }
+
+    @SuppressWarnings("unchecked")
+    private void testSuiteE_TimelineRentTableAndBotPositionSync() throws Exception {
+        try (GatewayHarness gw = startGatewayWithTurnTimeout("dev", null, 1)) {
+            int port = gw.port;
+            AuthUser p1 = registerViaRest(port, "tlP1", "pass1234", "TL Host");
+            AuthUser p2 = registerViaRest(port, "tlP2", "pass1234", "TL Guest");
+            Map<String, String> h1 = Map.of("Authorization", "Bearer " + p1.token);
+            Map<String, String> h2 = Map.of("Authorization", "Bearer " + p2.token);
+
+            HttpResponse createRes = RawHttpClient.request("127.0.0.1", port, "POST", "/api/v1/rooms", h1,
+                    "{\"roomName\":\"Timeline Arena\",\"maxPlayers\":2}");
+            assertEquals(201, createRes.statusCode, "Create room -> 201");
+            String roomId = (String) MiniJson.parseObject((String) MiniJson.parseObject(createRes.body).get("payload")).get("roomId");
+            String topicDest = "/topic/room/" + roomId;
+
+            try (StompWsClient c1 = new StompWsClient("127.0.0.1", port, "/ws", null)) {
+                assertEquals("CONNECTED", c1.connectAndExpectFrame("Bearer " + p1.token, 4000).command, "c1 CONNECTED");
+                c1.subscribe("sub-1", topicDest);
+                awaitGameSnapshot(c1, topicDest, 4000);
+
+                assertEquals(200, RawHttpClient.request("127.0.0.1", port, "POST", "/api/v1/rooms/" + roomId + "/join", h2, "{}").statusCode,
+                        "p2 joins");
+                assertEquals(200, RawHttpClient.request("127.0.0.1", port, "POST", "/api/v1/rooms/" + roomId + "/start", h1, "{}").statusCode,
+                        "Start -> 200");
+                awaitTopicMessageOfType(c1, topicDest, "GAME_STARTED", 4000);
+
+                // Wait for 1s timeout -> Bot takes over and rolls
+                Map<String, Object> botDiceMsg = awaitTopicMessageOfType(c1, topicDest, "DICE_ROLLED", 5000);
+                Map<String, Object> botDice = MiniJson.parseObject((String) botDiceMsg.get("payload"));
+                assertEquals(Boolean.TRUE, botDice.get("bot"), "Bot DICE_ROLLED has bot=true");
+                assertNotNull(botDice.get("fromPosition"), "DICE_ROLLED has fromPosition");
+                assertNotNull(botDice.get("newPosition"), "DICE_ROLLED has newPosition");
+                assertNotNull(botDice.get("finalPosition"), "DICE_ROLLED has finalPosition");
+                int newPos = ((Number) botDice.get("newPosition")).intValue();
+
+                awaitTopicMessageOfType(c1, topicDest, "TURN_CHANGED", 5000);
+
+                // Verify TIMELINE_APPENDED broadcasts
+                List<Map<String, Object>> appended = new ArrayList<>();
+                for (int i = 0; i < 6; i++) {
+                    Map<String, Object> msg = awaitTopicMessageOfTypeOrNull(c1, topicDest, "TIMELINE_APPENDED", 400);
+                    if (msg == null) break;
+                    appended.add(MiniJson.parseObject((String) msg.get("payload")));
+                }
+                assertTrue(appended.size() >= 3, "Received TIMELINE_APPENDED broadcasts (got " + appended.size() + ")");
+                long prevId = -1;
+                long prevTs = -1;
+                for (Map<String, Object> entry : appended) {
+                    long id = ((Number) entry.get("id")).longValue();
+                    long ts = ((Number) entry.get("ts")).longValue();
+                    assertTrue(id > prevId, "TIMELINE_APPENDED id strictly increasing");
+                    assertTrue(ts >= prevTs, "TIMELINE_APPENDED ts monotonic");
+                    prevId = id;
+                    prevTs = ts;
+                }
+
+                // Verify REST snapshot timeline, Asia/Ho_Chi_Minh legacy logs, Bot dice log & rentTable
+                HttpResponse snapRes = RawHttpClient.request("127.0.0.1", port, "GET", "/api/v1/rooms/" + roomId + "/snapshot", h1, null);
+                assertEquals(200, snapRes.statusCode, "GET snapshot -> 200");
+                Map<String, Object> snap = MiniJson.parseObject((String) MiniJson.parseObject(snapRes.body).get("payload"));
+
+                List<Object> timeline = (List<Object>) snap.get("timeline");
+                assertNotNull(timeline, "Snapshot includes timeline");
+                assertTrue(timeline.size() >= 4, "Timeline has >= 4 entries");
+                long tlPrevId = Long.MAX_VALUE;
+                long tlPrevTs = Long.MAX_VALUE;
+                int botRollLogCount = 0;
+                int takeoverLogCount = 0;
+                for (Object obj : timeline) {
+                    Map<String, Object> e = (Map<String, Object>) obj;
+                    long id = ((Number) e.get("id")).longValue();
+                    long ts = ((Number) e.get("ts")).longValue();
+                    String msg = String.valueOf(e.get("message"));
+                    assertTrue(id < tlPrevId, "Snapshot timeline sorted newest-first (strictly decreasing id)");
+                    assertTrue(ts <= tlPrevTs, "Snapshot timeline ts monotonic");
+                    tlPrevId = id;
+                    tlPrevTs = ts;
+                    if (msg.contains("gieo được") && msg.contains("-> Ô #" + newPos)) {
+                        botRollLogCount++;
+                        assertTrue(msg.startsWith("[Bot] "), "Bot roll log has [Bot] prefix: " + msg);
+                    }
+                    if (msg.startsWith("[Bot] Tiếp quản lượt")) {
+                        takeoverLogCount++;
+                    }
+                }
+                assertTrue(botRollLogCount >= 1, "Bot roll log matches newPosition Ô #" + newPos);
+                assertEquals(1, takeoverLogCount, "Exactly 1 canonical BOT_TAKEOVER log for turn 1");
+
+                // Verify legacy logs have [HH:mm:ss] in Asia/Ho_Chi_Minh
+                List<Object> logs = (List<Object>) snap.get("logs");
+                assertNotNull(logs, "Snapshot includes legacy logs");
+                String vnHour = java.time.ZonedDateTime.now(java.time.ZoneId.of("Asia/Ho_Chi_Minh"))
+                        .format(java.time.format.DateTimeFormatter.ofPattern("HH:"));
+                assertTrue(String.valueOf(logs.get(0)).startsWith("[" + vnHour),
+                        "Legacy logs formatted in Asia/Ho_Chi_Minh (" + logs.get(0) + ")");
+
+                // Verify snapshot rentTable & taxAmount
+                Map<String, Object> street1 = findTile(snap, 1);
+                List<Object> streetRentTable = (List<Object>) street1.get("rentTable");
+                assertNotNull(streetRentTable, "Street tile has rentTable");
+                assertEquals(5, streetRentTable.size(), "Street rentTable has 5 entries");
+                assertEquals(50_000, ((Number) street1.get("buildingCost")).intValue(), "Street 1 buildingCost == 50,000");
+
+                Map<String, Object> rr5 = findTile(snap, 5);
+                List<Object> rrTable = (List<Object>) rr5.get("rentTable");
+                assertEquals(List.of(25_000L, 50_000L, 100_000L, 200_000L),
+                        rrTable.stream().map(n -> ((Number) n).longValue()).toList(),
+                        "Railroad rentTable == [25000, 50000, 100000, 200000]");
+
+                Map<String, Object> util12 = findTile(snap, 12);
+                List<Object> utilTable = (List<Object>) util12.get("rentTable");
+                assertEquals(List.of(4_000L, 10_000L),
+                        utilTable.stream().map(n -> ((Number) n).longValue()).toList(),
+                        "Utility rentTable == [4000, 10000]");
+
+                Map<String, Object> tax4 = findTile(snap, 4);
+                assertEquals(200_000, ((Number) tax4.get("taxAmount")).intValue(), "Income Tax == 200,000");
+                Map<String, Object> tax38 = findTile(snap, 38);
+                assertEquals(100_000, ((Number) tax38.get("taxAmount")).intValue(), "Luxury Tax == 100,000");
+            }
+        }
+    }
+
+    @SuppressWarnings("unchecked")
+    private void testSuiteE_AutoRentShieldStompAndSingleLog() throws Exception {
+        GatewayConfig config = new GatewayConfig(0, "dev", null, TEST_JWT_SECRET, 3600_000L);
+        CloudflareOriginFilter originFilter = config.createOriginFilter();
+        JwtTokenProvider jwtProvider = new JwtTokenProvider(config.getJwtSecret(), config.getJwtValidityMs());
+        PasswordEncoderUtil passwordEncoder = new PasswordEncoderUtil();
+        UserRepository userRepository = new UserRepository();
+        TurnTimerService timerService = new TurnTimerService(
+                Executors.newScheduledThreadPool(2, r -> {
+                    Thread t = new Thread(r, "test-shield-timer");
+                    t.setDaemon(true);
+                    return t;
+                }),
+                30
+        );
+        RoomManagerService roomManager = new RoomManagerService(timerService);
+        AuthRestController authController = new AuthRestController(userRepository, passwordEncoder, jwtProvider);
+        RoomRestController roomController = new RoomRestController(roomManager);
+        GameWebSocketController wsController = new GameWebSocketController();
+
+        ApiGatewayServer server = new ApiGatewayServer(
+                config, originFilter, jwtProvider, userRepository,
+                roomManager, authController, roomController, wsController);
+        server.start();
+        try {
+            int port = server.getPort();
+            AuthUser p1 = registerViaRest(port, "shP1", "pass1234", "Shield User");
+            AuthUser p2 = registerViaRest(port, "shP2", "pass1234", "Owner User");
+            Map<String, String> h1 = Map.of("Authorization", "Bearer " + p1.token);
+            Map<String, String> h2 = Map.of("Authorization", "Bearer " + p2.token);
+
+            HttpResponse createRes = RawHttpClient.request("127.0.0.1", port, "POST", "/api/v1/rooms", h1,
+                    "{\"roomName\":\"Shield Arena\",\"maxPlayers\":2}");
+            assertEquals(201, createRes.statusCode, "Create room -> 201");
+            String roomId = (String) MiniJson.parseObject((String) MiniJson.parseObject(createRes.body).get("payload")).get("roomId");
+            assertEquals(200, RawHttpClient.request("127.0.0.1", port, "POST", "/api/v1/rooms/" + roomId + "/join", h2, "{}").statusCode,
+                    "p2 joins");
+            assertEquals(200, RawHttpClient.request("127.0.0.1", port, "POST", "/api/v1/rooms/" + roomId + "/start", h1, "{}").statusCode,
+                    "Start -> 200");
+
+            GameRoom room = roomManager.getRoom(roomId);
+            Player player1 = room.getPlayers().stream()
+                    .filter(p -> p1.userId.equals(p.getId())).findFirst().orElseThrow();
+            Player player2 = room.getPlayers().stream()
+                    .filter(p -> p2.userId.equals(p.getId())).findFirst().orElseThrow();
+            StreetProperty tile3 = (StreetProperty) room.getBoard().getTile(3);
+            player2.buyProperty(tile3);
+            player1.getInventory().addItem(new RentShieldItem());
+            room.setForcedDiceValue(3); // p1 lands on tile 3 owned by p2 -> auto-consumes RENT_SHIELD
+
+            String topicDest = "/topic/room/" + roomId;
+            try (StompWsClient c1 = new StompWsClient("127.0.0.1", port, "/ws", null)) {
+                assertEquals("CONNECTED", c1.connectAndExpectFrame("Bearer " + p1.token, 4000).command, "c1 CONNECTED");
+                c1.subscribe("sub-1", topicDest);
+                awaitGameSnapshot(c1, topicDest, 4000);
+
+                c1.send("/app/room/" + roomId + "/roll-dice", "{\"turnId\":" + room.getTurnId() + "}");
+
+                Map<String, Object> itemMsg = awaitTopicMessageOfType(c1, topicDest, "ITEM_USED", 4000);
+                Map<String, Object> itemPayload = MiniJson.parseObject((String) itemMsg.get("payload"));
+                assertEquals("RENT_SHIELD", itemPayload.get("itemId"), "ITEM_USED itemId == RENT_SHIELD");
+                assertEquals(Boolean.TRUE, itemPayload.get("auto"), "ITEM_USED auto == true");
+                assertEquals(3, ((Number) itemPayload.get("tileIndex")).intValue(), "ITEM_USED tileIndex == 3");
+                assertEquals(1_500_000, player1.getMoney(), "Auto RENT_SHIELD blocked rent deduction");
+
+                // Verify exactly 1 canonical log line for auto RENT_SHIELD in timeline
+                HttpResponse snapRes = RawHttpClient.request("127.0.0.1", port, "GET", "/api/v1/rooms/" + roomId + "/snapshot", h1, null);
+                Map<String, Object> snap = MiniJson.parseObject((String) MiniJson.parseObject(snapRes.body).get("payload"));
+                List<Object> timeline = (List<Object>) snap.get("timeline");
+                long shieldLogs = timeline.stream()
+                        .map(o -> String.valueOf(((Map<String, Object>) o).get("message")))
+                        .filter(m -> m.contains("Khiên Hộ mệnh"))
+                        .count();
+                assertEquals(1L, shieldLogs, "Exactly 1 canonical log line for auto RENT_SHIELD");
+            }
+        } finally {
+            server.stop();
+            roomManager.shutdown();
+        }
+    }
+
+    private Map<String, Object> awaitTopicMessageOfTypeOrNull(
+            StompWsClient client, String dest, String expectedType, long timeoutMs) throws InterruptedException {
+        long deadline = System.currentTimeMillis() + timeoutMs;
+        while (System.currentTimeMillis() < deadline) {
+            long rem = Math.max(10L, deadline - System.currentTimeMillis());
+            StompFrame frame = client.awaitAndConsume(f -> {
+                if (!"MESSAGE".equals(f.command) || !dest.equals(f.headers.get("destination"))) {
+                    return false;
+                }
+                Map<String, Object> msg = MiniJson.parseObject(f.body);
+                return expectedType.equals(msg.get("type"));
+            }, rem);
+            if (frame != null) {
+                return MiniJson.parseObject(frame.body);
+            }
+        }
+        return null;
     }
 
     @SuppressWarnings("unchecked")

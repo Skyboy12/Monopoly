@@ -11,6 +11,8 @@ import model.GameRoom;
  * Nếu sở hữu cả 2 tiện ích: tiền thuê = diceTotal * 10.
  */
 public class UtilityProperty extends PropertyTile {
+    public static final int SINGLE_MULTIPLIER = 4_000;
+    public static final int DOUBLE_MULTIPLIER = 10_000;
 
     public UtilityProperty(int index, String name, int price) {
         super(index, name, price);
@@ -32,7 +34,7 @@ public class UtilityProperty extends PropertyTile {
                 ? room.getLastDice().getTotal()
                 : 7;
 
-        int multiplier = (utilityCount >= 2) ? 10 : 4;
+        int multiplier = (utilityCount >= 2) ? DOUBLE_MULTIPLIER : SINGLE_MULTIPLIER;
 
         return diceTotal * multiplier;
     }

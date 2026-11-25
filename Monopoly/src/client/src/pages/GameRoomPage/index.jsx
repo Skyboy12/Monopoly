@@ -35,6 +35,7 @@ import {
 } from '../../data/gameData'
 import api, { getApiError, parseGamePayload } from '../../plugins/api'
 import { createGameSocket } from '../../plugins/gameSocket'
+import { BAIL_AMOUNT, formatMoney } from '../../utils/money'
 
 function readStoredUser() {
   try {
@@ -42,28 +43,6 @@ function readStoredUser() {
   } catch {
     return {}
   }
-}
-
-function getRoomLogsKey(roomId) {
-  return `roomLogs:${roomId}`
-}
-
-function readStoredLogs(roomId) {
-  if (!roomId) return []
-  try {
-    const raw = sessionStorage.getItem(getRoomLogsKey(roomId))
-    if (!raw) return []
-    const parsed = JSON.parse(raw)
-    return Array.isArray(parsed)
-      ? parsed.filter((entry) => typeof entry === 'string' && entry.trim())
-      : []
-  } catch {
-    return []
-  }
-}
-
-function stripLogTimestamp(line) {
-  return String(line || '').replace(/^\[\d{2}:\d{2}:\d{2}\]\s*/, '').trim()
 }
 
 function decoratePlayers(players = []) {
@@ -112,7 +91,7 @@ function getTargetableTiles(itemId, tiles = [], playerId = '', myMoney = 0) {
   if (itemId === 'HOSTILE_TAKEOVER') {
     return tiles.filter((t) => {
       if (!t.ownerId || t.ownerId === playerId) return false
-      const buildingCost = t.buildingCost || 50
+      const buildingCost = t.buildingCost || 50000
       const buildingVal = t.hasHotel
         ? 5 * buildingCost
         : (t.houseCount ?? 0) * buildingCost
@@ -180,7 +159,9 @@ export default function GameRoomPage() {
   const [leaving, setLeaving] = useState(false)
   const [wsConnected, setWsConnected] = useState(false)
   const [wsStatus, setWsStatus] = useState('connecting')
-  const [logs, setLogs] = useState(() => readStoredLogs(resolvedRoomId))
+  const [serverTimeline, setServerTimeline] = useState([])
+  const [localNotices, setLocalNotices] = useState([])
+  const [itemFx, setItemFx] = useState(null)
   const [toast, setToast] = useState('')
   const [turnDeadline, setTurnDeadline] = useState(() => Date.now() + 30000)
   const [nowMs, setNowMs] = useState(() => Date.now())
@@ -194,11 +175,14 @@ export default function GameRoomPage() {
 
   const socketRef = useRef(null)
   const toastTimerRef = useRef(null)
+  const itemFxTimerRef = useRef(null)
   const playersRef = useRef([])
   const gameStateRef = useRef(gameState)
   const lastTurnKeyRef = useRef('')
   const navigatedFinishRef = useRef(false)
   const hasConnectedOnceRef = useRef(false)
+  const clockSkewRef = useRef(0)
+  const localNoticeSeqRef = useRef(0)
 
   useEffect(() => {
     gameStateRef.current = gameState
@@ -214,42 +198,35 @@ export default function GameRoomPage() {
     toastTimerRef.current = window.setTimeout(() => setToast(''), 3600)
   }, [])
 
-  const appendLog = useCallback((entry) => {
-    if (!entry) return
-    const normalized = stripLogTimestamp(entry)
-    if (!normalized) return
-    const timeLabel = new Date().toLocaleTimeString('vi-VN', {
-      hour: '2-digit',
-      minute: '2-digit',
-      second: '2-digit',
-    })
-    setLogs((prev) => {
-      if (prev.slice(0, 5).some((item) => stripLogTimestamp(item) === normalized)) {
-        return prev
-      }
-      return [`[${timeLabel}] ${normalized}`, ...prev].slice(0, 30)
-    })
+  const addLocalNotice = useCallback((message) => {
+    const text = String(message || '').trim()
+    if (!text) return
+    const ts = Date.now() - clockSkewRef.current
+    localNoticeSeqRef.current += 1
+    const key = `local-${ts}-${localNoticeSeqRef.current}`
+    setLocalNotices((prev) => [{ key, ts, message: text, isLocal: true }, ...prev].slice(0, 20))
   }, [])
 
-  const hydrateServerLogs = useCallback((serverLogs) => {
-    if (!Array.isArray(serverLogs) || serverLogs.length === 0) return
-    const cleaned = serverLogs
-      .filter((entry) => typeof entry === 'string' && entry.trim())
-      .map((entry) => entry.trim())
-    if (cleaned.length === 0) return
-
-    setLogs((prev) => {
-      const existing = new Set(prev.map(stripLogTimestamp))
-      const missing = [...cleaned]
-        .reverse()
-        .filter((entry) => {
-          const normalized = stripLogTimestamp(entry)
-          if (!normalized || existing.has(normalized)) return false
-          existing.add(normalized)
-          return true
-        })
-      if (missing.length === 0) return prev
-      return [...missing, ...prev].slice(0, 30)
+  const mergeServerTimeline = useCallback((entries) => {
+    if (!Array.isArray(entries) || entries.length === 0) return
+    setServerTimeline((prev) => {
+      const byId = new Map()
+      prev.forEach((item) => {
+        if (item && item.id != null) byId.set(Number(item.id), item)
+      })
+      entries.forEach((item) => {
+        if (item && item.id != null && item.message) {
+          const id = Number(item.id)
+          byId.set(id, {
+            id,
+            ts: Number(item.ts || Date.now()),
+            message: String(item.message),
+          })
+        }
+      })
+      return Array.from(byId.values())
+        .sort((a, b) => b.id - a.id)
+        .slice(0, 60)
     })
   }, [])
 
@@ -270,18 +247,12 @@ export default function GameRoomPage() {
   }, [])
 
   useEffect(() => {
-    if (!resolvedRoomId) return
-    try {
-      sessionStorage.setItem(getRoomLogsKey(resolvedRoomId), JSON.stringify(logs.slice(0, 30)))
-    } catch {
-      // Ignore storage quota errors
-    }
-  }, [resolvedRoomId, logs])
-
-  useEffect(() => {
     return () => {
       if (toastTimerRef.current) {
         window.clearTimeout(toastTimerRef.current)
+      }
+      if (itemFxTimerRef.current) {
+        window.clearTimeout(itemFxTimerRef.current)
       }
     }
   }, [])
@@ -386,14 +357,18 @@ export default function GameRoomPage() {
       gameStateRef.current = nextState
       playersRef.current = nextPlayers
 
+      if (typeof payload.serverTimeEpochMs === 'number' && payload.serverTimeEpochMs > 0) {
+        clockSkewRef.current = Date.now() - payload.serverTimeEpochMs
+      }
+
       setGameState(nextState)
       const syncedFromServer = syncTurnDeadline(payload, false)
       if (!syncedFromServer && (turnChanged || (nextRoomStatus === 'PLAYING' && prev.roomStatus !== 'PLAYING'))) {
         setTurnDeadline(Date.now() + (nextTurnTimeoutSeconds || 30) * 1000)
         setNowMs(Date.now())
       }
-      if (Array.isArray(payload.logs)) {
-        hydrateServerLogs(payload.logs)
+      if (Array.isArray(payload.timeline)) {
+        mergeServerTimeline(payload.timeline)
       }
       setRolling(false)
       setLoadingSnapshot(false)
@@ -402,7 +377,7 @@ export default function GameRoomPage() {
         goToFinish(nextState)
       }
     },
-    [goToFinish, hydrateServerLogs, syncTurnDeadline],
+    [goToFinish, mergeServerTimeline, syncTurnDeadline],
   )
 
   const fetchSnapshot = useCallback(async () => {
@@ -478,12 +453,12 @@ export default function GameRoomPage() {
         setWsConnected(true)
         setWsStatus('online')
         if (hasConnectedOnceRef.current) {
-          appendLog('Đã khôi phục kết nối WebSocket.')
+          addLocalNotice('Đã khôi phục kết nối WebSocket.')
           showToast('Đã khôi phục kết nối WebSocket!')
           void fetchSnapshot()
         } else {
           hasConnectedOnceRef.current = true
-          appendLog('Đã kết nối máy chủ WebSocket.')
+          addLocalNotice('Đã kết nối máy chủ WebSocket.')
         }
       },
       onDisconnect: () => {
@@ -499,13 +474,19 @@ export default function GameRoomPage() {
       onError: (errMsg) => {
         setRolling(false)
         showToast(errMsg)
-        appendLog(`Lỗi kết nối: ${errMsg}`)
+        addLocalNotice(`Lỗi kết nối: ${errMsg}`)
       },
       onMessage: (message) => {
         const payload = parseGamePayload(message)
         switch (message.type) {
           case 'GAME_STATE_SNAPSHOT': {
             applySnapshot(payload)
+            break
+          }
+          case 'TIMELINE_APPENDED': {
+            if (payload && payload.id != null && payload.message) {
+              mergeServerTimeline([payload])
+            }
             break
           }
           case 'GAME_STARTED': {
@@ -517,7 +498,6 @@ export default function GameRoomPage() {
               botControl: false,
             }))
             syncTurnDeadline(payload, true)
-            appendLog('Ván đấu đã bắt đầu!')
             break
           }
           case 'TURN_TIMED_OUT': {
@@ -526,7 +506,6 @@ export default function GameRoomPage() {
               payload.newTurnId ?? payload.currentTurnId ?? payload.turnId ?? message.turnId ?? 0,
             )
             const actor = payload.playerName || resolveActorName(payload.playerId || message.senderId)
-            const turnNum = eventTurnId || gameStateRef.current.turnId
             setGameState((prev) => {
               if (eventTurnId > 0 && eventTurnId < prev.turnId) return prev
               return {
@@ -537,7 +516,6 @@ export default function GameRoomPage() {
                   (prev.phase === 'TIMEOUT' ? 'AWAITING_ROLL' : prev.phase),
               }
             })
-            appendLog(`${actor} hết giờ lượt #${turnNum} — Bot đang tiếp quản!`)
             showToast(`${actor} hết giờ — Bot đang tiếp quản lượt!`)
             break
           }
@@ -546,7 +524,6 @@ export default function GameRoomPage() {
             const eventTurnId = Number(
               payload.newTurnId ?? payload.currentTurnId ?? payload.turnId ?? message.turnId ?? 0,
             )
-            const actor = payload.playerName || resolveActorName(payload.playerId || message.senderId)
             setGameState((prev) => {
               if (eventTurnId > 0 && eventTurnId < prev.turnId) return prev
               return {
@@ -557,7 +534,6 @@ export default function GameRoomPage() {
                   (prev.phase === 'TIMEOUT' ? 'AWAITING_ROLL' : prev.phase),
               }
             })
-            appendLog(`[Bot] Tiếp quản lượt của ${actor}.`)
             break
           }
           case 'DICE_ROLLED': {
@@ -565,8 +541,6 @@ export default function GameRoomPage() {
             const eventTurnId = Number(
               payload.newTurnId ?? payload.currentTurnId ?? payload.turnId ?? message.turnId ?? 0,
             )
-            const actor = payload.playerName || resolveActorName(payload.playerId || message.senderId)
-            const prefix = payload.bot === true ? '[Bot] ' : ''
             const diceObj = {
               dice1: payload.dice1,
               dice2: payload.dice2,
@@ -584,27 +558,9 @@ export default function GameRoomPage() {
                 lastDice: diceObj,
               }
             })
-            const note =
-              payload.code === 'THREE_DOUBLES'
-                ? ' (Gieo đôi 3 lần -> Vào tù!)'
-                : ` -> Ô #${payload.newPosition}`
-            appendLog(
-              `${prefix}${actor} gieo được ${payload.dice1} + ${payload.dice2} = ${payload.total}${note}`,
-            )
-            break
-          }
-          case 'PROPERTY_BOUGHT': {
-            const actor = payload.playerName || resolveActorName(payload.ownerId || message.senderId)
-            const prefix = payload.bot === true ? '[Bot] ' : ''
-            appendLog(`${prefix}${actor} đã mua ${payload.tileName} với giá $${payload.price}.`)
             break
           }
           case 'PROPERTY_UPGRADED': {
-            const actor = payload.playerName || resolveActorName(payload.playerId || message.senderId)
-            const prefix = payload.bot === true ? '[Bot] ' : ''
-            const levelLabel = payload.hasHotel
-              ? 'Khách sạn'
-              : `${payload.houseCount ?? 0} nhà`
             if (payload.tileIndex !== undefined) {
               setGameState((prev) => ({
                 ...prev,
@@ -620,14 +576,10 @@ export default function GameRoomPage() {
                 ),
               }))
             }
-            appendLog(
-              `${prefix}${actor} đã nâng cấp ${payload.tileName || `ô #${payload.tileIndex}`} (${levelLabel}).`,
-            )
             break
           }
           case 'SPECIAL_EVENT_TRIGGERED': {
             const eventName = payload.eventName || payload.title || payload.eventId || 'Sự kiện đặc biệt'
-            const desc = payload.description ? ` — ${payload.description}` : ''
             setGameState((prev) => ({
               ...prev,
               activeEvents: Array.isArray(payload.activeEvents)
@@ -638,18 +590,34 @@ export default function GameRoomPage() {
                   ? Number(payload.rentMultiplier)
                   : prev.rentMultiplier,
             }))
-            appendLog(`Sự kiện đặc biệt: ${eventName}${desc}`)
             showToast(`Sự kiện: ${eventName}`)
             break
           }
           case 'ITEM_USED': {
-            const actor = payload.playerName || resolveActorName(payload.actorId || message.senderId)
-            appendLog(`${actor} đã kích hoạt vật phẩm ${payload.itemName || payload.itemId}.`)
-            break
-          }
-          case 'BAIL_PAID': {
-            const actor = payload.playerName || resolveActorName(payload.playerId || message.senderId)
-            appendLog(`${actor} đã nộp $50 bảo lãnh ra tù.`)
+            const actorId = payload.actorId || payload.playerId || message.senderId || ''
+            const actorName = payload.playerName || resolveActorName(actorId)
+            const fxKey = `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`
+            setItemFx({
+              key: fxKey,
+              itemId: payload.itemId,
+              itemName: payload.itemName || payload.itemId,
+              actorId,
+              actorName,
+              targetPlayerId: payload.targetPlayerId || '',
+              targetTileIndex:
+                payload.targetTileIndex !== undefined && payload.targetTileIndex !== ''
+                  ? Number(payload.targetTileIndex)
+                  : null,
+              tileIndex:
+                payload.tileIndex !== undefined && payload.tileIndex !== ''
+                  ? Number(payload.tileIndex)
+                  : null,
+              auto: payload.auto === true || payload.auto === 'true',
+            })
+            if (itemFxTimerRef.current) {
+              window.clearTimeout(itemFxTimerRef.current)
+            }
+            itemFxTimerRef.current = window.setTimeout(() => setItemFx(null), 2400)
             break
           }
           case 'TURN_CHANGED': {
@@ -657,9 +625,6 @@ export default function GameRoomPage() {
             const eventTurnId = Number(
               payload.newTurnId ?? payload.currentTurnId ?? payload.turnId ?? message.turnId ?? 0,
             )
-            const nextPlayerName =
-              payload.currentPlayerName || resolveActorName(payload.currentPlayerId)
-            const prefix = payload.bot === true ? '[Bot] ' : ''
             if (eventTurnId <= 0 || eventTurnId >= gameStateRef.current.turnId) {
               syncTurnDeadline(payload, true)
             }
@@ -678,16 +643,10 @@ export default function GameRoomPage() {
                 lastDice: payload.code === 'EXTRA_ROLL' ? prev.lastDice : null,
               }
             })
-            if (payload.code === 'EXTRA_ROLL') {
-              appendLog(`${prefix}${nextPlayerName} gieo đôi và được tung thêm lượt!`)
-            } else {
-              appendLog(`Chuyển lượt sang ${nextPlayerName} (Turn #${payload.newTurnId}).`)
-            }
             break
           }
           case 'GAME_FINISHED': {
             setRolling(false)
-            appendLog('Ván đấu đã kết thúc!')
             showToast('Ván đấu đã kết thúc!')
             if (Array.isArray(payload.players) && payload.players.length > 0) {
               applySnapshot({ ...payload, roomStatus: 'FINISHED', phase: 'FINISHED' })
@@ -696,17 +655,8 @@ export default function GameRoomPage() {
             }
             break
           }
-          case 'ROOM_JOINED': {
-            const actor = payload.playerName || resolveActorName(payload.playerId || message.senderId)
-            appendLog(`${actor} đã tham gia phòng.`)
-            if (payload.hostId) {
-              setGameState((prev) => ({ ...prev, hostId: payload.hostId }))
-            }
-            break
-          }
+          case 'ROOM_JOINED':
           case 'ROOM_LEFT': {
-            const actor = payload.playerName || resolveActorName(payload.playerId || message.senderId)
-            appendLog(`${actor} đã rời phòng.`)
             if (payload.hostId) {
               setGameState((prev) => ({ ...prev, hostId: payload.hostId }))
             }
@@ -714,7 +664,6 @@ export default function GameRoomPage() {
           }
           case 'ROOM_DELETED': {
             sessionStorage.removeItem('activeRoomId')
-            sessionStorage.removeItem(getRoomLogsKey(resolvedRoomId))
             showToast('Phòng chơi đã giải tán.')
             navigate('/', { replace: true })
             break
@@ -723,15 +672,11 @@ export default function GameRoomPage() {
             setRolling(false)
             const errText = payload.message || payload.error || 'Hành động bị từ chối.'
             showToast(errText)
-            appendLog(`Từ chối lệnh: ${errText}`)
+            addLocalNotice(`Từ chối lệnh: ${errText}`)
             break
           }
-          default: {
-            if (message.type) {
-              appendLog(`Sự kiện: ${message.type}`)
-            }
+          default:
             break
-          }
         }
       },
     })
@@ -742,7 +687,7 @@ export default function GameRoomPage() {
       socketRef.current = null
       setWsConnected(false)
     }
-  }, [resolvedRoomId, playerId, applySnapshot, appendLog, fetchSnapshot, showToast, syncTurnDeadline, resolveActorName, navigate])
+  }, [resolvedRoomId, playerId, applySnapshot, addLocalNotice, mergeServerTimeline, fetchSnapshot, showToast, syncTurnDeadline, resolveActorName, navigate])
 
   // 4s fallback REST snapshot polling ONLY while WebSocket is disconnected
   useEffect(() => {
@@ -773,7 +718,7 @@ export default function GameRoomPage() {
     isMyTurn &&
     isRollPhase &&
     myPlayer?.status === 'IN_JAIL' &&
-    (myPlayer?.money ?? 0) >= 50
+    (myPlayer?.money ?? 0) >= BAIL_AMOUNT
   const myTile = myPlayer
     ? gameState.tiles.find((tile) => tile.index === myPlayer.position) ||
       BOARD_TILE_META[myPlayer.position]
@@ -798,7 +743,7 @@ export default function GameRoomPage() {
             tile.ownerId === playerId &&
             !tile.hasHotel &&
             !tile.mortgaged &&
-            (myPlayer?.money ?? 0) >= (tile.buildingCost || 50),
+            (myPlayer?.money ?? 0) >= (tile.buildingCost || 50000),
         )
       : []
   const canUpgrade = upgradableTiles.length > 0
@@ -871,9 +816,12 @@ export default function GameRoomPage() {
     }
   }
 
-  const upgradeProperty = () => {
-    if (!canUpgrade || !selectedUpgradeTile) return
-    const sent = socketRef.current?.sendUpgrade(gameState.turnId, selectedUpgradeTile.index)
+  const upgradeProperty = (tileIndexOverride) => {
+    if (!canUpgrade) return
+    const targetIdx =
+      tileIndexOverride !== undefined ? Number(tileIndexOverride) : selectedUpgradeTile?.index
+    if (targetIdx === undefined || targetIdx === null || Number.isNaN(targetIdx)) return
+    const sent = socketRef.current?.sendUpgrade(gameState.turnId, targetIdx)
     if (!sent) {
       showToast('WebSocket chưa sẵn sàng.')
     }
@@ -904,7 +852,6 @@ export default function GameRoomPage() {
       // Vẫn thoát về sảnh nếu phòng đã đóng trên server
     } finally {
       sessionStorage.removeItem('activeRoomId')
-      sessionStorage.removeItem(getRoomLogsKey(resolvedRoomId))
       socketRef.current?.disconnect()
       navigate('/', { replace: true })
     }
@@ -959,7 +906,7 @@ export default function GameRoomPage() {
   }
 
   const submitPendingItem = (event) => {
-    event.preventDefault()
+    event?.preventDefault?.()
     if (!pendingItem) return
     const meta = ITEM_UI_META[pendingItem.id] || { contextType: 'none' }
     const context = {}
@@ -1001,6 +948,62 @@ export default function GameRoomPage() {
   const targetableTiles = pendingItem
     ? getTargetableTiles(pendingItem.id, gameState.tiles, playerId, myPlayer?.money ?? 0)
     : []
+
+  const timelineEntries = [
+    ...serverTimeline.map((e) => ({ ...e, key: `srv-${e.id}`, isLocal: false })),
+    ...localNotices,
+  ]
+    .sort((a, b) => {
+      if (b.ts !== a.ts) return b.ts - a.ts
+      if (!a.isLocal && !b.isLocal) return b.id - a.id
+      return a.isLocal ? -1 : 1
+    })
+    .slice(0, 60)
+
+  const itemControls = {
+    items: myItems.map((item) => {
+      const isPassive = item.id === 'RENT_SHIELD' || item.triggerPhase === 'PASSIVE'
+      const phaseOk = isItemPhaseCompatible(gameState.phase, item.triggerPhase)
+      const usable = !isPassive && isMyTurn && phaseOk
+      let reason = ''
+      if (isPassive) {
+        reason = 'Tự động kích hoạt khi trả tiền thuê'
+      } else if (!isMyTurn) {
+        reason = 'Chưa tới lượt của bạn'
+      } else if (!phaseOk) {
+        reason = `Chỉ dùng ở pha ${item.triggerPhase}`
+      }
+      return {
+        id: item.id,
+        name: item.name,
+        description: item.description || '',
+        triggerPhase: item.triggerPhase,
+        usable,
+        reason,
+      }
+    }),
+    pendingItem,
+    targetableTileIndices: targetableTiles.map((t) => t.index),
+    desiredDiceValue,
+    setDesiredDiceValue,
+    opponents: activeOpponents.map((p) => ({ id: p.id, name: p.name, color: p.color })),
+    targetPlayerId,
+    setTargetPlayerId,
+    onUse: openOrUseItem,
+    onSubmit: submitPendingItem,
+    onCancel: () => setPendingItem(null),
+    onTargetTile: (tileIndex) => {
+      if (!pendingItem) return
+      const sent = socketRef.current?.sendItem(gameState.turnId, pendingItem.id, {
+        targetTileIndex: Number(tileIndex),
+      })
+      if (!sent) {
+        showToast('WebSocket chưa sẵn sàng.')
+        return
+      }
+      setPendingItem(null)
+    },
+  }
 
   return (
     <main className="party-game">
@@ -1175,7 +1178,7 @@ export default function GameRoomPage() {
                         </p>
                       </div>
                     </div>
-                    <strong>${Number(player.money ?? 0).toLocaleString()}</strong>
+                    <strong>{formatMoney(player.money ?? 0)}</strong>
                   </div>
                 )
               })}
@@ -1190,10 +1193,19 @@ export default function GameRoomPage() {
               </span>
             </div>
             <div className="game-logs">
-              {logs.length === 0 ? (
+              {timelineEntries.length === 0 ? (
                 <p>Chưa có sự kiện nào trong phiên này.</p>
               ) : (
-                logs.map((entry, idx) => <p key={`${idx}-${entry}`}>{entry}</p>)
+                timelineEntries.map((entry) => {
+                  const timeLabel = new Date(entry.ts).toLocaleTimeString('vi-VN', {
+                    hour12: false,
+                  })
+                  return (
+                    <p className={entry.isLocal ? 'log-local' : ''} key={entry.key}>
+                      [{timeLabel}] {entry.message}
+                    </p>
+                  )
+                })
               )}
             </div>
           </section>
@@ -1204,6 +1216,7 @@ export default function GameRoomPage() {
             tiles={gameState.tiles}
             players={gameState.players}
             currentPlayerId={gameState.currentPlayerId}
+            myPlayerId={playerId}
             dice={gameState.lastDice}
             canRoll={canRoll}
             rolling={rolling}
@@ -1215,8 +1228,10 @@ export default function GameRoomPage() {
             buyPrice={myTile?.price ?? 0}
             onBuy={buyProperty}
             canUpgrade={canUpgrade}
-            upgradeCost={selectedUpgradeTile?.buildingCost || 50}
+            upgradeCost={selectedUpgradeTile?.buildingCost || 50000}
             onUpgrade={upgradeProperty}
+            upgradableTileIndices={upgradableTiles.map((t) => t.index)}
+            onUpgradeTile={(idx) => upgradeProperty(idx)}
             canPayBail={canPayBail}
             onPayBail={payBail}
             canEndTurn={canEndTurn}
@@ -1227,6 +1242,8 @@ export default function GameRoomPage() {
             statusHeadline={statusHeadline}
             activeEvents={gameState.activeEvents}
             rentMultiplier={gameState.rentMultiplier}
+            itemControls={itemControls}
+            itemFx={itemFx}
           />
           <div className="status-pill">
             <div>
@@ -1302,8 +1319,8 @@ export default function GameRoomPage() {
                   <KeyRound size={20} />
                 </div>
                 <span>
-                  <strong>Nộp bảo lãnh ($50)</strong>
-                  <small>Trả $50 để ra tù ngay lập tức</small>
+                  <strong>Nộp bảo lãnh ({formatMoney(BAIL_AMOUNT)})</strong>
+                  <small>Trả {formatMoney(BAIL_AMOUNT)} để ra tù ngay lập tức</small>
                 </span>
               </button>
             )}
@@ -1319,7 +1336,7 @@ export default function GameRoomPage() {
               </div>
               <span>
                 <strong>
-                  Mua bất động sản{isPurchasableTile && myTile?.price ? ` ($${myTile.price})` : ''}
+                  Mua bất động sản{isPurchasableTile && myTile?.price ? ` (${formatMoney(myTile.price)})` : ''}
                 </strong>
                 <small>
                   {canBuy
@@ -1342,7 +1359,7 @@ export default function GameRoomPage() {
                   >
                     {upgradableTiles.map((tile) => (
                       <option value={tile.index} key={tile.index}>
-                        #{tile.index} {tile.name} (${tile.buildingCost || 50})
+                        #{tile.index} {tile.name} ({formatMoney(tile.buildingCost || 50000)})
                       </option>
                     ))}
                   </select>
@@ -1350,7 +1367,7 @@ export default function GameRoomPage() {
                 <button
                   type="button"
                   className="side-action upgrade-action enabled"
-                  onClick={upgradeProperty}
+                  onClick={() => upgradeProperty()}
                 >
                   <div>
                     <Building2 size={20} />
@@ -1359,7 +1376,7 @@ export default function GameRoomPage() {
                     <strong>Nâng cấp nhà / KS</strong>
                     <small>
                       {selectedUpgradeTile
-                        ? `${selectedUpgradeTile.name} ($${selectedUpgradeTile.buildingCost || 50})`
+                        ? `${selectedUpgradeTile.name} (${formatMoney(selectedUpgradeTile.buildingCost || 50000)})`
                         : 'Nâng cấp bất động sản'}
                     </small>
                   </span>
@@ -1463,7 +1480,7 @@ export default function GameRoomPage() {
                     >
                       {targetableTiles.map((tile) => (
                         <option value={tile.index} key={tile.index}>
-                          #{tile.index} {tile.name} (${tile.price})
+                          #{tile.index} {tile.name} ({formatMoney(tile.price)})
                         </option>
                       ))}
                     </select>

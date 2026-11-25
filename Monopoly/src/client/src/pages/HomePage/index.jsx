@@ -121,12 +121,12 @@ export default function HomePage() {
     })
   }
 
-  const createRoom = async ({ roomName, maxPlayers }) => {
+  const createRoom = async ({ roomName, maxPlayers, botCount = 0 }) => {
     setLobbyError('')
     setCreateError('')
     setCreatingRoom(true)
     try {
-      const response = await api.post('/api/v1/rooms', { roomName, maxPlayers })
+      const response = await api.post('/api/v1/rooms', { roomName, maxPlayers, botCount })
       if (response.data?.type === 'ERROR') {
         const errPayload = parseGamePayload(response.data)
         const msg = errPayload.message || errPayload.error || 'Không thể tạo phòng.'

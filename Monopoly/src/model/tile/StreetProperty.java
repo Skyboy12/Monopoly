@@ -49,24 +49,34 @@ public class StreetProperty extends PropertyTile {
 
     public int getBuildingCost() {
         if (this.colorGroup == null) {
-            return 100;
+            return 100_000;
         }
         switch (this.colorGroup.toUpperCase()) {
             case "BROWN":
             case "LIGHT_BLUE":
-                return 50;
+                return 50_000;
             case "PINK":
             case "ORANGE":
-                return 100;
+                return 100_000;
             case "RED":
             case "YELLOW":
-                return 150;
+                return 150_000;
             case "GREEN":
             case "DARK_BLUE":
-                return 200;
+                return 200_000;
             default:
-                return 100;
+                return 100_000;
         }
+    }
+
+    public int[] getRentTable() {
+        return new int[]{
+                this.baseRent,
+                this.baseRent * 3,
+                this.baseRent * 5,
+                this.baseRent * 7,
+                this.baseRent * 10
+        };
     }
 
     public boolean canUpgrade() {

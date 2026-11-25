@@ -49,7 +49,7 @@ public class DefaultBotStrategy implements BotStrategy {
 
                 if (phase == TurnPhase.AWAITING_ROLL) {
                     if (player.getStatus() == PlayerStatus.IN_JAIL) {
-                        if (player.getMoney() >= 150) {
+                        if (player.getMoney() >= 3L * Player.BAIL_AMOUNT) {
                             if (!engine.payBail(playerId, turnId)) {
                                 engine.endTurn(playerId, turnId);
                                 return;

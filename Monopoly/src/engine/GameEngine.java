@@ -17,6 +17,7 @@ import model.tile.Tile;
 
 import java.time.Instant;
 import java.util.Collections;
+import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.UUID;
@@ -351,13 +352,14 @@ public class GameEngine {
 
         room.setLastDice(dice);
 
+        int fromPosition = player.getPosition();
         int predictedNewPos;
         if (wasInJail) {
             boolean willEscape = dice.isDouble() || player.getTurnsInJail() >= 2;
-            predictedNewPos = willEscape ? ((player.getPosition() + dice.getTotal()) % 40) : player.getPosition();
+            predictedNewPos = willEscape ? ((fromPosition + dice.getTotal()) % 40) : fromPosition;
         } else {
             boolean threeDoubles = (consecutiveDoubles + (dice.isDouble() ? 1 : 0)) >= 3;
-            predictedNewPos = threeDoubles ? 10 : ((player.getPosition() + dice.getTotal()) % 40);
+            predictedNewPos = threeDoubles ? 10 : ((fromPosition + dice.getTotal()) % 40);
         }
 
         emit(
@@ -368,6 +370,7 @@ public class GameEngine {
                         "dice1", String.valueOf(dice.getDice1()),
                         "dice2", String.valueOf(dice.getDice2()),
                         "total", String.valueOf(dice.getTotal()),
+                        "fromPosition", String.valueOf(fromPosition),
                         "newPosition", String.valueOf(predictedNewPos)
                 )
         );
@@ -442,7 +445,7 @@ public class GameEngine {
 
         if (tile != null) {
             try {
-                tile.onLand(player, room);
+                landWithAutoShieldTracking(player, tile, turnId);
 
                 int hops = 0;
                 while (tile.isFrozen() && hops < 5 && player.getStatus() == PlayerStatus.ACTIVE) {
@@ -452,7 +455,7 @@ public class GameEngine {
                     if (slidTile == null) {
                         break;
                     }
-                    slidTile.onLand(player, room);
+                    landWithAutoShieldTracking(player, slidTile, turnId);
                     tile = slidTile;
                 }
 
@@ -468,7 +471,11 @@ public class GameEngine {
                                 "tileIndex",
                                 String.valueOf(tile.getIndex()),
                                 "tileName",
-                                tile.getName()
+                                tile.getName(),
+                                "finalPosition",
+                                String.valueOf(player.getPosition()),
+                                "slides",
+                                String.valueOf(hops)
                         )
                 );
 
@@ -713,7 +720,7 @@ public class GameEngine {
 
             if (!player.payBail()) {
                 return save(result(false, "PAY_BAIL", actionId,
-                        "NOT_ENOUGH_MONEY", "Không đủ $50 để nộp tiền bảo lãnh.",
+                        "NOT_ENOUGH_MONEY", "Không đủ $50,000 để nộp tiền bảo lãnh.",
                         playerId, turnId));
             }
 
@@ -721,11 +728,11 @@ public class GameEngine {
                     EngineEvent.Type.BAIL_PAID,
                     player,
                     turnId,
-                    Map.of("amount", "50")
+                    Map.of("amount", String.valueOf(Player.BAIL_AMOUNT))
             );
 
             return save(result(true, "PAY_BAIL", actionId,
-                    "OK", "Đã nộp tiền bảo lãnh ra tù.",
+                    "OK", "Đã nộp tiền bảo lãnh $50,000 ra tù.",
                     playerId, turnId));
         }
     }
@@ -808,14 +815,26 @@ public class GameEngine {
                 swappedPositionThisTurn = true;
             }
 
+            Map<String, String> itemData = new HashMap<>();
+            itemData.put("itemId", item.getId());
+            itemData.put("itemName", item.getName());
+            if (context != null) {
+                if (context.getTargetPlayerId() != null && !context.getTargetPlayerId().isBlank()) {
+                    itemData.put("targetPlayerId", context.getTargetPlayerId());
+                }
+                if (context.getTargetTileIndex() != null) {
+                    itemData.put("targetTileIndex", String.valueOf(context.getTargetTileIndex()));
+                }
+                if (context.getDesiredDiceValue() != null) {
+                    itemData.put("desiredDiceValue", String.valueOf(context.getDesiredDiceValue()));
+                }
+            }
+
             emit(
                     EngineEvent.Type.ITEM_USED,
                     player,
                     turnId,
-                    Map.of(
-                            "itemId", item.getId(),
-                            "itemName", item.getName()
-                    )
+                    itemData
             );
 
             return save(result(true, "USE_ITEM", actionId,
@@ -1508,6 +1527,35 @@ public class GameEngine {
     }
 
     // ================= HELPER =================
+
+    private void landWithAutoShieldTracking(Player player, Tile tile, int turnId) {
+        int shieldsBefore = countRentShields(player);
+        boolean activeBefore = player.isRentShieldActive();
+        tile.onLand(player, room);
+        int shieldsAfter = countRentShields(player);
+        boolean activeAfter = player.isRentShieldActive();
+        if (shieldsAfter < shieldsBefore || (activeBefore && !activeAfter)) {
+            Map<String, String> shieldData = new HashMap<>();
+            shieldData.put("itemId", "RENT_SHIELD");
+            shieldData.put("itemName", "Khiên Hộ mệnh");
+            shieldData.put("auto", "true");
+            shieldData.put("tileIndex", String.valueOf(tile.getIndex()));
+            emit(EngineEvent.Type.ITEM_USED, player, turnId, shieldData);
+        }
+    }
+
+    private int countRentShields(Player player) {
+        if (player == null || player.getInventory() == null) {
+            return 0;
+        }
+        int count = 0;
+        for (Item item : player.getInventory().getItems()) {
+            if ("RENT_SHIELD".equals(item.getId())) {
+                count++;
+            }
+        }
+        return count;
+    }
 
     private boolean validRoom(String roomId) {
         return roomId != null && roomId.equals(room.getId());

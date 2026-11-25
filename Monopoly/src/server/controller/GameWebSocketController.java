@@ -26,8 +26,11 @@ import model.tile.Tile;
 import model.tile.UtilityProperty;
 import network.GameMessage;
 import server.gateway.SimpleJson;
+import server.service.RoomManagerService;
 
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.UUID;
 
 /**
@@ -44,25 +47,39 @@ public class GameWebSocketController {
             return buildError(roomId, playerId, turnId, "ENGINE_NOT_FOUND", "Không tìm thấy GameEngine.");
         }
 
+        GameRoom room = engine.getRoom();
+        int fromPosition = 0;
+        boolean wasInJail = false;
+        synchronized (room) {
+            Player prePlayer = findPlayer(room, playerId);
+            if (prePlayer != null) {
+                fromPosition = prePlayer.getPosition();
+                wasInJail = prePlayer.getStatus() == PlayerStatus.IN_JAIL;
+            }
+        }
+
         ActionResult result = engine.rollDice(roomId, playerId, turnId, "ROLL-" + UUID.randomUUID());
         if (!result.isSuccess()) {
             return buildError(roomId, playerId, turnId, result.getCode(), result.getMessage());
         }
 
         String phaseName = engine.getEffectivePhase().name();
-        GameRoom room = engine.getRoom();
         synchronized (room) {
             Dice dice = room.getLastDice();
             Player player = findPlayer(room, playerId);
             int d1 = (dice != null) ? dice.getDice1() : 0;
             int d2 = (dice != null) ? dice.getDice2() : 0;
             int total = (dice != null) ? dice.getTotal() : 0;
-            int pos = (player != null) ? player.getPosition() : 0;
+            int finalPos = (player != null) ? player.getPosition() : 0;
+            int newPos = finalPos;
+            if (!"THREE_DOUBLES".equals(result.getCode()) && (!wasInJail || (player != null && player.getStatus() != PlayerStatus.IN_JAIL))) {
+                newPos = (fromPosition + total) % 40;
+            }
             int money = (player != null) ? player.getMoney() : 0;
 
             String payload = String.format(
-                    "{\"code\":\"%s\",\"dice1\":%d,\"dice2\":%d,\"total\":%d,\"newPosition\":%d,\"playerMoney\":%d,\"phase\":\"%s\",\"currentTurnId\":%d}",
-                    result.getCode(), d1, d2, total, pos, money, phaseName, room.getTurnId()
+                    "{\"code\":\"%s\",\"playerId\":\"%s\",\"dice1\":%d,\"dice2\":%d,\"total\":%d,\"fromPosition\":%d,\"newPosition\":%d,\"finalPosition\":%d,\"playerMoney\":%d,\"phase\":\"%s\",\"currentTurnId\":%d}",
+                    result.getCode(), SimpleJson.escape(playerId), d1, d2, total, fromPosition, newPos, finalPos, money, phaseName, room.getTurnId()
             );
             return new GameMessage("DICE_ROLLED", playerId, room.getId(), room.getTurnId(), payload);
         }
@@ -197,14 +214,18 @@ public class GameWebSocketController {
 
         String phaseName = engine.getEffectivePhase().name();
         synchronized (room) {
-            String payload = String.format(
-                    "{\"itemId\":\"%s\",\"itemName\":\"%s\",\"actorId\":\"%s\",\"phase\":\"%s\"}",
-                    SimpleJson.escape(itemId),
-                    SimpleJson.escape(itemName),
-                    SimpleJson.escape(playerId),
-                    phaseName
-            );
-            return new GameMessage("ITEM_USED", playerId, room.getId(), room.getTurnId(), payload);
+            Map<String, Object> payloadMap = new LinkedHashMap<>();
+            payloadMap.put("itemId", itemId);
+            payloadMap.put("itemName", itemName);
+            payloadMap.put("actorId", playerId);
+            payloadMap.put("auto", false);
+            payloadMap.put("targetPlayerId", safeContext.getTargetPlayerId());
+            payloadMap.put("targetTileIndex", safeContext.getTargetTileIndex());
+            payloadMap.put("desiredDiceValue", safeContext.getDesiredDiceValue());
+            payloadMap.put("tileIndex", null);
+            payloadMap.put("bot", false);
+            payloadMap.put("phase", phaseName);
+            return new GameMessage("ITEM_USED", playerId, room.getId(), room.getTurnId(), SimpleJson.stringify(payloadMap));
         }
     }
 
@@ -259,7 +280,7 @@ public class GameWebSocketController {
             int money = (currentPlayer != null) ? currentPlayer.getMoney() : 0;
             String status = (currentPlayer != null) ? currentPlayer.getStatus().name() : PlayerStatus.ACTIVE.name();
             String payload = String.format(
-                    "{\"playerId\":\"%s\",\"money\":%d,\"status\":\"%s\",\"turnId\":%d,\"phase\":\"%s\"}",
+                    "{\"playerId\":\"%s\",\"amount\":50000,\"money\":%d,\"status\":\"%s\",\"turnId\":%d,\"phase\":\"%s\"}",
                     SimpleJson.escape(playerId),
                     money,
                     status,
@@ -301,6 +322,16 @@ public class GameWebSocketController {
             long turnDeadlineEpochMs,
             List<String> recentLogs,
             int turnTimeoutSeconds) {
+        return buildSnapshotMessage(engine, hostId, turnDeadlineEpochMs, recentLogs, turnTimeoutSeconds, List.of());
+    }
+
+    public GameMessage buildSnapshotMessage(
+            GameEngine engine,
+            String hostId,
+            long turnDeadlineEpochMs,
+            List<String> recentLogs,
+            int turnTimeoutSeconds,
+            List<RoomManagerService.RoomLogEntry> timelineEntries) {
         if (engine == null) {
             return buildError(null, "SERVER", 0, "ENGINE_NOT_FOUND", "Không tìm thấy GameEngine.");
         }
@@ -381,9 +412,40 @@ public class GameWebSocketController {
                 String colorGroupJson = (tile instanceof StreetProperty sp && sp.getColorGroup() != null)
                         ? "\"" + SimpleJson.escape(sp.getColorGroup()) + "\""
                         : "null";
+                int rent = 0;
+                if (tile instanceof PropertyTile prop
+                        && prop.getOwner() != null
+                        && !prop.isMortgaged()
+                        && !tile.isFrozen()) {
+                    rent = prop.calculateRent(room) * Math.max(1, room.getRentMultiplier());
+                }
+                int baseRent = 0;
+                String rentTableJson = "[]";
+                if (tile instanceof StreetProperty sp) {
+                    baseRent = sp.getBaseRent();
+                    int[] rt = sp.getRentTable();
+                    StringBuilder rtb = new StringBuilder("[");
+                    for (int r = 0; r < rt.length; r++) {
+                        if (r > 0) rtb.append(",");
+                        rtb.append(rt[r]);
+                    }
+                    rtb.append("]");
+                    rentTableJson = rtb.toString();
+                } else if (tile instanceof RailroadProperty) {
+                    baseRent = RailroadProperty.BASE_RENT;
+                    rentTableJson = "[" + RailroadProperty.rentForCount(1) + ","
+                            + RailroadProperty.rentForCount(2) + ","
+                            + RailroadProperty.rentForCount(3) + ","
+                            + RailroadProperty.rentForCount(4) + "]";
+                } else if (tile instanceof UtilityProperty) {
+                    baseRent = UtilityProperty.SINGLE_MULTIPLIER;
+                    rentTableJson = "[" + UtilityProperty.SINGLE_MULTIPLIER + ","
+                            + UtilityProperty.DOUBLE_MULTIPLIER + "]";
+                }
+                int taxAmount = (tile instanceof TaxTile tax) ? tax.getTaxAmount() : 0;
 
                 tilesJson.append(String.format(
-                        "{\"index\":%d,\"name\":\"%s\",\"type\":\"%s\",\"price\":%d,\"ownerId\":%s,\"frozen\":%b,\"houseCount\":%d,\"hasHotel\":%b,\"mortgaged\":%b,\"buildingCost\":%d,\"colorGroup\":%s}",
+                        "{\"index\":%d,\"name\":\"%s\",\"type\":\"%s\",\"price\":%d,\"ownerId\":%s,\"frozen\":%b,\"houseCount\":%d,\"hasHotel\":%b,\"mortgaged\":%b,\"buildingCost\":%d,\"colorGroup\":%s,\"rent\":%d,\"baseRent\":%d,\"rentTable\":%s,\"taxAmount\":%d}",
                         tile.getIndex(),
                         SimpleJson.escape(tile.getName()),
                         tileType,
@@ -394,7 +456,11 @@ public class GameWebSocketController {
                         hasHotel,
                         mortgaged,
                         buildingCost,
-                        colorGroupJson
+                        colorGroupJson,
+                        rent,
+                        baseRent,
+                        rentTableJson,
+                        taxAmount
                 ));
             }
             tilesJson.append("]");
@@ -433,6 +499,27 @@ public class GameWebSocketController {
             }
             logsJson.append("]");
 
+            StringBuilder timelineJson = new StringBuilder("[");
+            if (timelineEntries != null) {
+                boolean first = true;
+                for (RoomManagerService.RoomLogEntry entry : timelineEntries) {
+                    if (entry == null) {
+                        continue;
+                    }
+                    if (!first) {
+                        timelineJson.append(",");
+                    }
+                    first = false;
+                    timelineJson.append(String.format(
+                            "{\"id\":%d,\"ts\":%d,\"message\":\"%s\"}",
+                            entry.id(),
+                            entry.ts(),
+                            SimpleJson.escape(entry.message())
+                    ));
+                }
+            }
+            timelineJson.append("]");
+
             Dice lastDice = room.getLastDice();
             String lastDiceJson = (lastDice == null)
                     ? "null"
@@ -444,7 +531,7 @@ public class GameWebSocketController {
 
             Player current = room.getCurrentPlayer();
             String payload = String.format(
-                    "{\"roomId\":\"%s\",\"roomName\":\"%s\",\"hostId\":\"%s\",\"roomStatus\":\"%s\",\"maxPlayers\":%d,\"turnId\":%d,\"phase\":\"%s\",\"actionPhase\":\"%s\",\"botControl\":%b,\"currentPlayerId\":\"%s\",\"turnDeadlineEpochMs\":%d,\"serverTimeEpochMs\":%d,\"turnTimeoutSeconds\":%d,\"rentMultiplier\":%d,\"activeEvents\":%s,\"lastDice\":%s,\"players\":%s,\"tiles\":%s,\"logs\":%s}",
+                    "{\"roomId\":\"%s\",\"roomName\":\"%s\",\"hostId\":\"%s\",\"roomStatus\":\"%s\",\"maxPlayers\":%d,\"turnId\":%d,\"phase\":\"%s\",\"actionPhase\":\"%s\",\"botControl\":%b,\"currentPlayerId\":\"%s\",\"turnDeadlineEpochMs\":%d,\"serverTimeEpochMs\":%d,\"turnTimeoutSeconds\":%d,\"rentMultiplier\":%d,\"activeEvents\":%s,\"lastDice\":%s,\"players\":%s,\"tiles\":%s,\"logs\":%s,\"timeline\":%s}",
                     SimpleJson.escape(room.getId()),
                     SimpleJson.escape(room.getName()),
                     SimpleJson.escape(resolvedHostId == null ? "" : resolvedHostId),
@@ -463,7 +550,8 @@ public class GameWebSocketController {
                     lastDiceJson,
                     playersJson,
                     tilesJson,
-                    logsJson
+                    logsJson,
+                    timelineJson
             );
             return new GameMessage("GAME_STATE_SNAPSHOT", "SERVER", room.getId(), room.getTurnId(), payload);
         }

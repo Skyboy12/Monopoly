@@ -9,9 +9,18 @@ export default function CreateRoomModal({
 }) {
   const [roomName, setRoomName] = useState('')
   const [maxPlayers, setMaxPlayers] = useState(4)
+  const [botCount, setBotCount] = useState(0)
   const [localError, setLocalError] = useState('')
 
   if (!open) return null
+
+  const handleMaxPlayersChange = (val) => {
+    const nextMax = Number(val)
+    setMaxPlayers(nextMax)
+    if (botCount >= nextMax) {
+      setBotCount(Math.max(0, nextMax - 1))
+    }
+  }
 
   const handleSubmit = (event) => {
     event.preventDefault()
@@ -21,7 +30,11 @@ export default function CreateRoomModal({
       return
     }
     setLocalError('')
-    onCreate({ roomName: trimmed, maxPlayers: Number(maxPlayers) })
+    onCreate({
+      roomName: trimmed,
+      maxPlayers: Number(maxPlayers),
+      botCount: Number(botCount),
+    })
   }
 
   const displayedError = localError || serverError
@@ -53,11 +66,23 @@ export default function CreateRoomModal({
           Số người tối đa
           <select
             value={maxPlayers}
-            onChange={(event) => setMaxPlayers(Number(event.target.value))}
+            onChange={(event) => handleMaxPlayersChange(event.target.value)}
           >
             <option value={2}>2 người</option>
             <option value={3}>3 người</option>
             <option value={4}>4 người</option>
+          </select>
+        </label>
+        <label>
+          Đấu với Bot
+          <select
+            value={botCount}
+            onChange={(event) => setBotCount(Number(event.target.value))}
+          >
+            <option value={0}>Không (Chỉ đấu với người)</option>
+            <option value={1}>1 Bot</option>
+            {maxPlayers >= 3 && <option value={2}>2 Bot</option>}
+            {maxPlayers >= 4 && <option value={3}>3 Bot</option>}
           </select>
         </label>
         <button type="submit" className="primary wide" disabled={loading}>

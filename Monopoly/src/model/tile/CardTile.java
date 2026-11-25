@@ -22,14 +22,14 @@ public class CardTile extends Tile {
     private static final SecureRandom RANDOM = new SecureRandom();
 
     private static final List<Card> CHANCE_DECK = List.of(
-            new BonusCashCard("CHANCE_DIVIDEND", "Ngân hàng chia cổ tức $50.", 50),
-            new BonusCashCard("CHANCE_INVESTMENT", "Đầu tư sinh lời, nhận $150.", 150),
+            new BonusCashCard("CHANCE_DIVIDEND", "Ngân hàng chia cổ tức $50,000.", 50_000),
+            new BonusCashCard("CHANCE_INVESTMENT", "Đầu tư sinh lời, nhận $150,000.", 150_000),
             new ItemRewardCard("CHANCE_MYSTERY_BOX", "Nhặt được rương vật phẩm ngẫu nhiên.")
     );
 
     private static final List<Card> COMMUNITY_CHEST_DECK = List.of(
-            new BonusCashCard("CHEST_REFUND", "Hoàn thuế thu nhập, nhận $100.", 100),
-            new BonusCashCard("CHEST_PRIZE", "Giải nhì cuộc thi sắc đẹp, nhận $50.", 50),
+            new BonusCashCard("CHEST_REFUND", "Hoàn thuế thu nhập, nhận $100,000.", 100_000),
+            new BonusCashCard("CHEST_PRIZE", "Giải nhì cuộc thi sắc đẹp, nhận $50,000.", 50_000),
             new ItemRewardCard("CHEST_SUPPLY_DROP", "Nhận tiếp tế một vật phẩm ngẫu nhiên.")
     );
 

@@ -9,13 +9,13 @@ import model.PlayerStatus;
  * Ngân hàng tặng mỗi người chơi $500.
  */
 public class StimulusDayEvent extends GameEvent {
-    private static final int STIMULUS_AMOUNT = 500;
+    private static final int STIMULUS_AMOUNT = 500_000;
 
     public StimulusDayEvent() {
         super(
                 "STIMULUS_DAY",
                 "Ngày Phát Tiền Cứu Trợ",
-                "Ngân hàng tự động phát cho mỗi người chơi trong phòng $500.",
+                "Ngân hàng tự động phát cho mỗi người chơi trong phòng $500,000.",
                 0
         );
     }

@@ -5,7 +5,7 @@ Tài liệu này mô tả các tính năng đã hoàn thiện và đang hoạt �
 ---
 
 ## 1. Lối chơi Cờ Tỷ Phú Chuẩn (Core Gameplay)
-- **Bàn cờ 40 ô đa hình**: Bao gồm ô Bắt đầu (`GO` +$200 khi đi qua), Đất ở (`StreetProperty` chia theo nhóm màu, hỗ trợ xây nhà & khách sạn), Nhà ga (`RailroadProperty`), Công ty Tiện ích (`UtilityProperty`), Ô Thuế (`TaxTile`), Ô Thẻ Cơ hội / Khí vận (`CardTile`), Ô Vào Tù (`GoToJailTile`), Ô Thăm Tù (`JailTile`), và Bãi đỗ xe (`FreeParkingTile`).
+- **Bàn cờ 40 ô đa hình**: Bao gồm ô Bắt đầu (`GO` +$200,000 khi đi qua), Đất ở (`StreetProperty` chia theo nhóm màu, hỗ trợ xây nhà & khách sạn), Nhà ga (`RailroadProperty`), Công ty Tiện ích (`UtilityProperty`), Ô Thuế (`TaxTile`), Ô Thẻ Cơ hội / Khí vận (`CardTile`), Ô Vào Tù (`GoToJailTile`), Ô Thăm Tù (`JailTile`), và Bãi đỗ xe (`FreeParkingTile`).
 - **Authoritative Server (`GameEngine`)**:
   - Xúc xắc (`Dice`) được sinh bằng `SecureRandom` trên server.
   - Quản lý chặt chẽ pha lượt (`TurnPhase`: `AWAITING_ROLL`, `RESOLVING_ACTION`, `AWAITING_DECISION`, `FINISHED`).
@@ -29,7 +29,7 @@ Mỗi người chơi sở hữu túi đồ `Inventory` (sức chứa mặc đị
 - **Thuế Nhà Giàu Siêu Cấp (`RichTaxEvent`)**: Người giàu nhất bị trừ 40% tiền mặt chia đều cho các người chơi còn lại.
 - **Cơn Điên Bất Động Sản (`PropertyBoomEvent`)**: Nhân 3 lần tiền thuê toàn bàn cờ trong thời gian hiệu lực.
 - **Đảo Lộn Đất Đai (`ContinentalDriftEvent`)**: Tráo đổi quyền sở hữu 2 ô đất ngẫu nhiên giữa 2 người chơi.
-- **Ngày Phát Tiền Cứu Trợ (`StimulusDayEvent`)**: Ngân hàng phát $500 cho mỗi người chơi.
+- **Ngày Phát Tiền Cứu Trợ (`StimulusDayEvent`)**: Ngân hàng phát $500,000 cho mỗi người chơi.
 - **Động Đất Cục Bộ (`EarthquakeEvent`)**: Làm sập 1 cấp nhà trên một khu vực ngẫu nhiên.
 - **Mưa Bão Đóng Băng (`FrozenTileEvent`)**: Đóng băng 3 ô liên tiếp trong 3 lượt; người chơi đáp vào được miễn tiền thuê và tự động trượt thêm 2 bước.
 
