@@ -24,6 +24,7 @@ import {
   WifiOff,
   KeyRound,
   RefreshCw,
+  Building2,
 } from 'lucide-react'
 import Board from '../../components/Board'
 import {
@@ -68,6 +69,7 @@ function stripLogTimestamp(line) {
 function decoratePlayers(players = []) {
   return players.map((player, index) => ({
     ...player,
+    seatNumber: index + 1,
     color: PLAYER_COLORS[index % PLAYER_COLORS.length],
     avatar: (player.name || player.id || '?').charAt(0).toUpperCase(),
   }))
@@ -99,6 +101,26 @@ function ItemIcon({ itemId }) {
     default:
       return <Zap size={18} />
   }
+}
+
+function getTargetableTiles(itemId, tiles = [], playerId = '', myMoney = 0) {
+  if (itemId === 'DYNAMITE') {
+    return tiles.filter(
+      (t) => t.type === 'STREET' && ((t.houseCount ?? 0) > 0 || Boolean(t.hasHotel)),
+    )
+  }
+  if (itemId === 'HOSTILE_TAKEOVER') {
+    return tiles.filter((t) => {
+      if (!t.ownerId || t.ownerId === playerId) return false
+      const buildingCost = t.buildingCost || 50
+      const buildingVal = t.hasHotel
+        ? 5 * buildingCost
+        : (t.houseCount ?? 0) * buildingCost
+      const takeoverCost = (t.price || 0) + buildingVal
+      return (myMoney ?? 0) >= takeoverCost
+    })
+  }
+  return tiles.filter((t) => t.type === 'STREET' && t.ownerId)
 }
 
 function describePhase(roomStatus, phase) {
@@ -142,10 +164,14 @@ export default function GameRoomPage() {
     roomStatus: 'WAITING',
     turnId: location.state?.turnId ?? 1,
     phase: 'AWAITING_ROLL',
+    botControl: false,
     currentPlayerId: '',
     players: [],
     tiles: BOARD_TILE_META.map((tile) => ({ ...tile, ownerId: null, frozen: false })),
     lastDice: null,
+    turnTimeoutSeconds: 30,
+    activeEvents: [],
+    rentMultiplier: 1,
   })
 
   const [loadingSnapshot, setLoadingSnapshot] = useState(true)
@@ -153,10 +179,12 @@ export default function GameRoomPage() {
   const [rolling, setRolling] = useState(false)
   const [leaving, setLeaving] = useState(false)
   const [wsConnected, setWsConnected] = useState(false)
+  const [wsStatus, setWsStatus] = useState('connecting')
   const [logs, setLogs] = useState(() => readStoredLogs(resolvedRoomId))
   const [toast, setToast] = useState('')
   const [turnDeadline, setTurnDeadline] = useState(() => Date.now() + 30000)
   const [nowMs, setNowMs] = useState(() => Date.now())
+  const [upgradeTileIndex, setUpgradeTileIndex] = useState('')
 
   // Context prompt state when using targeted items
   const [pendingItem, setPendingItem] = useState(null)
@@ -170,6 +198,7 @@ export default function GameRoomPage() {
   const gameStateRef = useRef(gameState)
   const lastTurnKeyRef = useRef('')
   const navigatedFinishRef = useRef(false)
+  const hasConnectedOnceRef = useRef(false)
 
   useEffect(() => {
     gameStateRef.current = gameState
@@ -224,15 +253,17 @@ export default function GameRoomPage() {
     })
   }, [])
 
-  const syncTurnDeadline = useCallback((payload, fallbackTo30s = false) => {
+  const syncTurnDeadline = useCallback((payload, fallbackToDefault = false) => {
     if (typeof payload?.turnDeadlineEpochMs === 'number' && payload.turnDeadlineEpochMs > 0) {
       const skew = payload.serverTimeEpochMs ? Date.now() - payload.serverTimeEpochMs : 0
       setTurnDeadline(payload.turnDeadlineEpochMs + skew)
       setNowMs(Date.now())
       return true
     }
-    if (fallbackTo30s) {
-      setTurnDeadline(Date.now() + 30000)
+    if (fallbackToDefault) {
+      const timeoutSec =
+        Number(payload?.turnTimeoutSeconds ?? gameStateRef.current.turnTimeoutSeconds ?? 30) || 30
+      setTurnDeadline(Date.now() + timeoutSec * 1000)
       setNowMs(Date.now())
     }
     return false
@@ -273,15 +304,22 @@ export default function GameRoomPage() {
       if (navigatedFinishRef.current) return
       navigatedFinishRef.current = true
       sessionStorage.removeItem('activeRoomId')
-      navigate('/finish', {
+      const targetRoomId = snapshot.roomId || resolvedRoomId
+      const finishData = {
+        roomId: targetRoomId,
+        roomName: snapshot.roomName,
+        players: snapshot.players,
+        tiles: snapshot.tiles,
+        turnId: snapshot.turnId,
+      }
+      try {
+        sessionStorage.setItem('lastFinishedMatch', JSON.stringify(finishData))
+      } catch {
+        // Ignore storage quota errors
+      }
+      navigate(`/finish?roomId=${encodeURIComponent(targetRoomId)}`, {
         replace: true,
-        state: {
-          roomId: snapshot.roomId || resolvedRoomId,
-          roomName: snapshot.roomName,
-          players: snapshot.players,
-          tiles: snapshot.tiles,
-          turnId: snapshot.turnId,
-        },
+        state: finishData,
       })
     },
     [navigate, resolvedRoomId],
@@ -300,11 +338,27 @@ export default function GameRoomPage() {
           ? payload.tiles
           : prev.tiles
       const nextRoomStatus = payload.roomStatus || prev.roomStatus
-      const nextPhase = payload.phase || prev.phase
+      const nextPhase =
+        payload.actionPhase ||
+        (payload.phase === 'TIMEOUT'
+          ? prev.phase === 'TIMEOUT'
+            ? 'AWAITING_ROLL'
+            : prev.phase
+          : payload.phase || prev.phase)
+      const nextBotControl = Boolean(payload.botControl || payload.phase === 'TIMEOUT')
       const nextTurnId = payload.turnId ?? prev.turnId
       const nextCurrentPlayerId = payload.currentPlayerId ?? prev.currentPlayerId
       const nextLastDice =
         payload.lastDice !== undefined ? payload.lastDice : prev.lastDice
+      const nextTurnTimeoutSeconds = Number(
+        payload.turnTimeoutSeconds ?? prev.turnTimeoutSeconds ?? 30,
+      )
+      const nextActiveEvents = Array.isArray(payload.activeEvents)
+        ? payload.activeEvents
+        : prev.activeEvents || []
+      const nextRentMultiplier = Number(
+        payload.rentMultiplier ?? prev.rentMultiplier ?? 1,
+      )
 
       const nextState = {
         roomId: payload.roomId || prev.roomId,
@@ -314,10 +368,14 @@ export default function GameRoomPage() {
         roomStatus: nextRoomStatus,
         turnId: nextTurnId,
         phase: nextPhase,
+        botControl: nextBotControl,
         currentPlayerId: nextCurrentPlayerId,
         players: nextPlayers,
         tiles: nextTiles,
         lastDice: nextLastDice,
+        turnTimeoutSeconds: nextTurnTimeoutSeconds,
+        activeEvents: nextActiveEvents,
+        rentMultiplier: nextRentMultiplier,
       }
 
       const turnKey = `${nextTurnId}:${nextCurrentPlayerId}:${nextRoomStatus}`
@@ -331,7 +389,7 @@ export default function GameRoomPage() {
       setGameState(nextState)
       const syncedFromServer = syncTurnDeadline(payload, false)
       if (!syncedFromServer && (turnChanged || (nextRoomStatus === 'PLAYING' && prev.roomStatus !== 'PLAYING'))) {
-        setTurnDeadline(Date.now() + 30000)
+        setTurnDeadline(Date.now() + (nextTurnTimeoutSeconds || 30) * 1000)
         setNowMs(Date.now())
       }
       if (Array.isArray(payload.logs)) {
@@ -418,10 +476,25 @@ export default function GameRoomPage() {
       userId: playerId,
       onConnect: () => {
         setWsConnected(true)
-        appendLog('Đã kết nối máy chủ WebSocket.')
+        setWsStatus('online')
+        if (hasConnectedOnceRef.current) {
+          appendLog('Đã khôi phục kết nối WebSocket.')
+          showToast('Đã khôi phục kết nối WebSocket!')
+          void fetchSnapshot()
+        } else {
+          hasConnectedOnceRef.current = true
+          appendLog('Đã kết nối máy chủ WebSocket.')
+        }
       },
       onDisconnect: () => {
         setWsConnected(false)
+        setRolling(false)
+      },
+      onStatusChange: (status) => {
+        setWsStatus(status)
+      },
+      onAuthExpired: () => {
+        navigate('/login', { replace: true })
       },
       onError: (errMsg) => {
         setRolling(false)
@@ -440,7 +513,8 @@ export default function GameRoomPage() {
               ...prev,
               roomStatus: 'PLAYING',
               turnId: payload.turnId ?? message.turnId ?? prev.turnId,
-              phase: 'AWAITING_ROLL',
+              phase: payload.actionPhase || 'AWAITING_ROLL',
+              botControl: false,
             }))
             syncTurnDeadline(payload, true)
             appendLog('Ván đấu đã bắt đầu!')
@@ -448,28 +522,49 @@ export default function GameRoomPage() {
           }
           case 'TURN_TIMED_OUT': {
             setRolling(false)
+            const eventTurnId = Number(
+              payload.newTurnId ?? payload.currentTurnId ?? payload.turnId ?? message.turnId ?? 0,
+            )
             const actor = payload.playerName || resolveActorName(payload.playerId || message.senderId)
-            const turnNum = payload.turnId ?? message.turnId ?? gameStateRef.current.turnId
-            setGameState((prev) => ({
-              ...prev,
-              phase: 'TIMEOUT',
-            }))
+            const turnNum = eventTurnId || gameStateRef.current.turnId
+            setGameState((prev) => {
+              if (eventTurnId > 0 && eventTurnId < prev.turnId) return prev
+              return {
+                ...prev,
+                botControl: true,
+                phase:
+                  payload.actionPhase ||
+                  (prev.phase === 'TIMEOUT' ? 'AWAITING_ROLL' : prev.phase),
+              }
+            })
             appendLog(`${actor} hết giờ lượt #${turnNum} — Bot đang tiếp quản!`)
             showToast(`${actor} hết giờ — Bot đang tiếp quản lượt!`)
             break
           }
           case 'BOT_TAKEOVER': {
             setRolling(false)
+            const eventTurnId = Number(
+              payload.newTurnId ?? payload.currentTurnId ?? payload.turnId ?? message.turnId ?? 0,
+            )
             const actor = payload.playerName || resolveActorName(payload.playerId || message.senderId)
-            setGameState((prev) => ({
-              ...prev,
-              phase: 'TIMEOUT',
-            }))
+            setGameState((prev) => {
+              if (eventTurnId > 0 && eventTurnId < prev.turnId) return prev
+              return {
+                ...prev,
+                botControl: true,
+                phase:
+                  payload.actionPhase ||
+                  (prev.phase === 'TIMEOUT' ? 'AWAITING_ROLL' : prev.phase),
+              }
+            })
             appendLog(`[Bot] Tiếp quản lượt của ${actor}.`)
             break
           }
           case 'DICE_ROLLED': {
             setRolling(false)
+            const eventTurnId = Number(
+              payload.newTurnId ?? payload.currentTurnId ?? payload.turnId ?? message.turnId ?? 0,
+            )
             const actor = payload.playerName || resolveActorName(payload.playerId || message.senderId)
             const prefix = payload.bot === true ? '[Bot] ' : ''
             const diceObj = {
@@ -477,12 +572,18 @@ export default function GameRoomPage() {
               dice2: payload.dice2,
               total: payload.total,
             }
-            setGameState((prev) => ({
-              ...prev,
-              turnId: payload.currentTurnId ?? message.turnId ?? prev.turnId,
-              phase: payload.phase || prev.phase,
-              lastDice: diceObj,
-            }))
+            setGameState((prev) => {
+              if (eventTurnId > 0 && eventTurnId < prev.turnId) return prev
+              const nextPhase =
+                payload.actionPhase ||
+                (payload.phase === 'TIMEOUT' ? prev.phase : payload.phase || prev.phase)
+              return {
+                ...prev,
+                turnId: payload.currentTurnId ?? message.turnId ?? prev.turnId,
+                phase: nextPhase,
+                lastDice: diceObj,
+              }
+            })
             const note =
               payload.code === 'THREE_DOUBLES'
                 ? ' (Gieo đôi 3 lần -> Vào tù!)'
@@ -498,6 +599,49 @@ export default function GameRoomPage() {
             appendLog(`${prefix}${actor} đã mua ${payload.tileName} với giá $${payload.price}.`)
             break
           }
+          case 'PROPERTY_UPGRADED': {
+            const actor = payload.playerName || resolveActorName(payload.playerId || message.senderId)
+            const prefix = payload.bot === true ? '[Bot] ' : ''
+            const levelLabel = payload.hasHotel
+              ? 'Khách sạn'
+              : `${payload.houseCount ?? 0} nhà`
+            if (payload.tileIndex !== undefined) {
+              setGameState((prev) => ({
+                ...prev,
+                tiles: prev.tiles.map((t) =>
+                  t.index === payload.tileIndex
+                    ? {
+                        ...t,
+                        houseCount: payload.houseCount ?? t.houseCount ?? 0,
+                        hasHotel: Boolean(payload.hasHotel),
+                        buildingCost: payload.buildingCost ?? t.buildingCost,
+                      }
+                    : t,
+                ),
+              }))
+            }
+            appendLog(
+              `${prefix}${actor} đã nâng cấp ${payload.tileName || `ô #${payload.tileIndex}`} (${levelLabel}).`,
+            )
+            break
+          }
+          case 'SPECIAL_EVENT_TRIGGERED': {
+            const eventName = payload.eventName || payload.title || payload.eventId || 'Sự kiện đặc biệt'
+            const desc = payload.description ? ` — ${payload.description}` : ''
+            setGameState((prev) => ({
+              ...prev,
+              activeEvents: Array.isArray(payload.activeEvents)
+                ? payload.activeEvents
+                : prev.activeEvents,
+              rentMultiplier:
+                payload.rentMultiplier !== undefined
+                  ? Number(payload.rentMultiplier)
+                  : prev.rentMultiplier,
+            }))
+            appendLog(`Sự kiện đặc biệt: ${eventName}${desc}`)
+            showToast(`Sự kiện: ${eventName}`)
+            break
+          }
           case 'ITEM_USED': {
             const actor = payload.playerName || resolveActorName(payload.actorId || message.senderId)
             appendLog(`${actor} đã kích hoạt vật phẩm ${payload.itemName || payload.itemId}.`)
@@ -510,18 +654,30 @@ export default function GameRoomPage() {
           }
           case 'TURN_CHANGED': {
             setRolling(false)
+            const eventTurnId = Number(
+              payload.newTurnId ?? payload.currentTurnId ?? payload.turnId ?? message.turnId ?? 0,
+            )
             const nextPlayerName =
               payload.currentPlayerName || resolveActorName(payload.currentPlayerId)
             const prefix = payload.bot === true ? '[Bot] ' : ''
-            syncTurnDeadline(payload, true)
-            setGameState((prev) => ({
-              ...prev,
-              turnId: payload.newTurnId ?? message.turnId ?? prev.turnId,
-              currentPlayerId: payload.currentPlayerId ?? prev.currentPlayerId,
-              phase: payload.phase || prev.phase,
-              roomStatus: payload.roomStatus || prev.roomStatus,
-              lastDice: payload.code === 'EXTRA_ROLL' ? prev.lastDice : null,
-            }))
+            if (eventTurnId <= 0 || eventTurnId >= gameStateRef.current.turnId) {
+              syncTurnDeadline(payload, true)
+            }
+            setGameState((prev) => {
+              if (eventTurnId > 0 && eventTurnId < prev.turnId) return prev
+              const nextPhase =
+                payload.actionPhase ||
+                (payload.phase === 'TIMEOUT' ? 'AWAITING_ROLL' : payload.phase || prev.phase)
+              return {
+                ...prev,
+                turnId: payload.newTurnId ?? message.turnId ?? prev.turnId,
+                currentPlayerId: payload.currentPlayerId ?? prev.currentPlayerId,
+                phase: nextPhase,
+                botControl: Boolean(payload.botControl),
+                roomStatus: payload.roomStatus || prev.roomStatus,
+                lastDice: payload.code === 'EXTRA_ROLL' ? prev.lastDice : null,
+              }
+            })
             if (payload.code === 'EXTRA_ROLL') {
               appendLog(`${prefix}${nextPlayerName} gieo đôi và được tung thêm lượt!`)
             } else {
@@ -588,6 +744,15 @@ export default function GameRoomPage() {
     }
   }, [resolvedRoomId, playerId, applySnapshot, appendLog, fetchSnapshot, showToast, syncTurnDeadline, resolveActorName, navigate])
 
+  // 4s fallback REST snapshot polling ONLY while WebSocket is disconnected
+  useEffect(() => {
+    if (wsConnected || !resolvedRoomId || !playerId) return undefined
+    const timer = window.setInterval(() => {
+      void fetchSnapshot()
+    }, 4000)
+    return () => window.clearInterval(timer)
+  }, [wsConnected, resolvedRoomId, playerId, fetchSnapshot])
+
   const myPlayer = gameState.players.find((player) => player.id === playerId) || null
   const currentPlayer =
     gameState.players.find((player) => player.id === gameState.currentPlayerId) ||
@@ -600,8 +765,15 @@ export default function GameRoomPage() {
   const canStartGame = isWaiting && isHost && gameState.players.length >= 2 && !startingGame
 
   const isMyTurn = isPlaying && Boolean(playerId) && gameState.currentPlayerId === playerId
-  const canRoll = isMyTurn && gameState.phase === 'AWAITING_ROLL' && myPlayer?.status === 'ACTIVE'
-  const canPayBail = isMyTurn && myPlayer?.status === 'IN_JAIL'
+  const isRollPhase = gameState.phase === 'AWAITING_ROLL' || gameState.phase === 'TIMEOUT'
+  const isInJailTurn = isMyTurn && myPlayer?.status === 'IN_JAIL'
+  const canRoll =
+    isMyTurn && isRollPhase && (myPlayer?.status === 'ACTIVE' || myPlayer?.status === 'IN_JAIL')
+  const canPayBail =
+    isMyTurn &&
+    isRollPhase &&
+    myPlayer?.status === 'IN_JAIL' &&
+    (myPlayer?.money ?? 0) >= 50
   const myTile = myPlayer
     ? gameState.tiles.find((tile) => tile.index === myPlayer.position) ||
       BOARD_TILE_META[myPlayer.position]
@@ -618,8 +790,27 @@ export default function GameRoomPage() {
     myPlayer?.status === 'ACTIVE' &&
     isPurchasableTile &&
     (myPlayer?.money ?? 0) >= (myTile?.price ?? 0)
+  const upgradableTiles =
+    isMyTurn && gameState.phase === 'AWAITING_DECISION' && myPlayer?.status === 'ACTIVE'
+      ? gameState.tiles.filter(
+          (tile) =>
+            tile.type === 'STREET' &&
+            tile.ownerId === playerId &&
+            !tile.hasHotel &&
+            !tile.mortgaged &&
+            (myPlayer?.money ?? 0) >= (tile.buildingCost || 50),
+        )
+      : []
+  const canUpgrade = upgradableTiles.length > 0
+  const selectedUpgradeTile =
+    upgradableTiles.find((t) => String(t.index) === String(upgradeTileIndex)) ||
+    (myTile && upgradableTiles.find((t) => t.index === myTile.index)) ||
+    upgradableTiles[0] ||
+    null
   const canEndTurn =
-    isMyTurn && (gameState.phase === 'AWAITING_DECISION' || myPlayer?.status === 'IN_JAIL')
+    isMyTurn &&
+    (gameState.phase === 'AWAITING_DECISION' ||
+      (isRollPhase && myPlayer?.status === 'IN_JAIL'))
 
   const activeTile = currentPlayer
     ? gameState.tiles.find((tile) => tile.index === currentPlayer.position) ||
@@ -627,9 +818,19 @@ export default function GameRoomPage() {
     : null
 
   const myItems = Array.isArray(myPlayer?.items) ? myPlayer.items : []
+  const timeoutSec = gameState.turnTimeoutSeconds || 30
   const turnTime = isPlaying
-    ? Math.min(30, Math.max(0, Math.ceil((turnDeadline - nowMs) / 1000)))
+    ? Math.min(timeoutSec, Math.max(0, Math.ceil((turnDeadline - nowMs) / 1000)))
     : 0
+
+  // Client-side stuck-at-0s self-heal watchdog
+  useEffect(() => {
+    if (!isPlaying || turnTime > 0) return undefined
+    const timer = window.setTimeout(() => {
+      void fetchSnapshot()
+    }, 2500)
+    return () => window.clearTimeout(timer)
+  }, [isPlaying, turnTime, fetchSnapshot])
 
   const startGame = async () => {
     if (!canStartGame) return
@@ -665,6 +866,14 @@ export default function GameRoomPage() {
   const buyProperty = () => {
     if (!canBuy || !myPlayer) return
     const sent = socketRef.current?.sendBuy(gameState.turnId, myPlayer.position)
+    if (!sent) {
+      showToast('WebSocket chưa sẵn sàng.')
+    }
+  }
+
+  const upgradeProperty = () => {
+    if (!canUpgrade || !selectedUpgradeTile) return
+    const sent = socketRef.current?.sendUpgrade(gameState.turnId, selectedUpgradeTile.index)
     if (!sent) {
       showToast('WebSocket chưa sẵn sàng.')
     }
@@ -717,6 +926,10 @@ export default function GameRoomPage() {
   }
 
   const openOrUseItem = (item) => {
+    if (item.id === 'RENT_SHIELD' || item.triggerPhase === 'PASSIVE') {
+      showToast(`${item.name} tự động kích hoạt khi bạn trả tiền thuê.`)
+      return
+    }
     if (!isMyTurn || !isItemPhaseCompatible(gameState.phase, item.triggerPhase)) {
       showToast(`Vật phẩm "${item.name}" chỉ dùng được ở pha ${item.triggerPhase}.`)
       return
@@ -734,10 +947,11 @@ export default function GameRoomPage() {
       )
       setTargetPlayerId(firstOpponent?.id || '')
     } else if (meta.contextType === 'targetTileIndex') {
-      const candidates = gameState.tiles.filter((tile) =>
-        item.id === 'HOSTILE_TAKEOVER'
-          ? tile.ownerId && tile.ownerId !== playerId
-          : tile.type === 'STREET' && tile.ownerId,
+      const candidates = getTargetableTiles(
+        item.id,
+        gameState.tiles,
+        playerId,
+        myPlayer?.money ?? 0,
       )
       setTargetTileIndex(candidates[0] ? String(candidates[0].index) : '')
     }
@@ -776,16 +990,17 @@ export default function GameRoomPage() {
   const statusHeadline = isWaiting
     ? `Phòng chờ (${gameState.players.length}/${gameState.maxPlayers})`
     : currentPlayer
-      ? `Lượt của ${currentPlayer.name}${currentPlayer.id === playerId ? ' (Bạn)' : ''}`
+      ? currentPlayer.id === playerId
+        ? 'Lượt của BẠN — Hãy hành động!'
+        : `Đang chờ ${currentPlayer.name} (P${currentPlayer.seatNumber || 1})`
       : 'Đang đồng bộ...'
 
   const activeOpponents = gameState.players.filter(
     (p) => p.id !== playerId && p.status === 'ACTIVE',
   )
-  const targetableTiles =
-    pendingItem?.id === 'HOSTILE_TAKEOVER'
-      ? gameState.tiles.filter((t) => t.ownerId && t.ownerId !== playerId)
-      : gameState.tiles.filter((t) => t.type === 'STREET' && t.ownerId)
+  const targetableTiles = pendingItem
+    ? getTargetableTiles(pendingItem.id, gameState.tiles, playerId, myPlayer?.money ?? 0)
+    : []
 
   return (
     <main className="party-game">
@@ -817,13 +1032,17 @@ export default function GameRoomPage() {
               <Copy size={12} />
             </button>
             <span>•</span>
-            <span>
+            <span className="room-pill-name" title={gameState.roomName}>
               <MapPin size={13} />
               {gameState.roomName}
             </span>
             <em className={wsConnected ? 'ws-online' : 'ws-offline'}>
               {wsConnected ? <Wifi size={12} /> : <WifiOff size={12} />}
-              {wsConnected ? 'WS Online' : 'Đang kết nối'}
+              {wsConnected
+                ? 'WS Online'
+                : wsStatus === 'reconnecting'
+                  ? 'Đang kết nối lại...'
+                  : 'Đang kết nối...'}
             </em>
           </div>
           <button
@@ -938,6 +1157,7 @@ export default function GameRoomPage() {
                       </div>
                       <div>
                         <h4>
+                          <em className="player-seat-badge">P{player.seatNumber}</em>
                           {player.name}
                           {player.id === gameState.hostId && ' ★'}
                           {player.id === playerId && ' (Bạn)'}
@@ -948,7 +1168,7 @@ export default function GameRoomPage() {
                           <Home size={10} />
                           {ownedCount} đất <b className="meta-dot">•</b>{' '}
                           {player.status === 'IN_JAIL'
-                            ? 'Trong tù'
+                            ? `Trong tù (${player.turnsInJail ?? 0}/3)`
                             : player.status === 'BANKRUPT'
                               ? 'Phá sản'
                               : tileAt?.name || `Ô #${player.position}`}
@@ -987,10 +1207,26 @@ export default function GameRoomPage() {
             dice={gameState.lastDice}
             canRoll={canRoll}
             rolling={rolling}
+            isInJail={isInJailTurn}
+            turnsInJail={myPlayer?.turnsInJail ?? 0}
             onRoll={rollDice}
+            isMyTurn={isMyTurn}
+            canBuy={canBuy}
+            buyPrice={myTile?.price ?? 0}
+            onBuy={buyProperty}
+            canUpgrade={canUpgrade}
+            upgradeCost={selectedUpgradeTile?.buildingCost || 50}
+            onUpgrade={upgradeProperty}
+            canPayBail={canPayBail}
+            onPayBail={payBail}
+            canEndTurn={canEndTurn}
+            onEndTurn={endTurn}
+            botControl={gameState.botControl}
             roomStatus={gameState.roomStatus}
             phase={gameState.phase}
             statusHeadline={statusHeadline}
+            activeEvents={gameState.activeEvents}
+            rentMultiplier={gameState.rentMultiplier}
           />
           <div className="status-pill">
             <div>
@@ -1043,13 +1279,15 @@ export default function GameRoomPage() {
                 <Dices size={20} />
               </div>
               <span>
-                <strong>Gieo xúc xắc</strong>
+                <strong>{isInJailTurn ? 'Thử gieo đôi ra tù' : 'Gieo xúc xắc'}</strong>
                 <small>
                   {rolling
                     ? 'Đang gửi lệnh...'
-                    : canRoll
-                      ? 'Nhấn để tung cặp xúc xắc'
-                      : 'Chưa tới pha gieo xúc xắc'}
+                    : isInJailTurn
+                      ? `Lượt tù ${myPlayer?.turnsInJail ?? 0}/3 — Gieo đôi để ra tù`
+                      : canRoll
+                        ? 'Nhấn để tung cặp xúc xắc'
+                        : 'Chưa tới pha gieo xúc xắc'}
                 </small>
               </span>
             </button>
@@ -1093,6 +1331,42 @@ export default function GameRoomPage() {
               </span>
             </button>
 
+            {canUpgrade && (
+              <div className="upgrade-control-group">
+                {upgradableTiles.length > 1 && (
+                  <select
+                    className="upgrade-select"
+                    aria-label="Chọn đất nâng cấp"
+                    value={selectedUpgradeTile?.index ?? ''}
+                    onChange={(e) => setUpgradeTileIndex(e.target.value)}
+                  >
+                    {upgradableTiles.map((tile) => (
+                      <option value={tile.index} key={tile.index}>
+                        #{tile.index} {tile.name} (${tile.buildingCost || 50})
+                      </option>
+                    ))}
+                  </select>
+                )}
+                <button
+                  type="button"
+                  className="side-action upgrade-action enabled"
+                  onClick={upgradeProperty}
+                >
+                  <div>
+                    <Building2 size={20} />
+                  </div>
+                  <span>
+                    <strong>Nâng cấp nhà / KS</strong>
+                    <small>
+                      {selectedUpgradeTile
+                        ? `${selectedUpgradeTile.name} ($${selectedUpgradeTile.buildingCost || 50})`
+                        : 'Nâng cấp bất động sản'}
+                    </small>
+                  </span>
+                </button>
+              </div>
+            )}
+
             <button
               type="button"
               className="end-turn"
@@ -1119,19 +1393,29 @@ export default function GameRoomPage() {
               <div className="inventory-grid">
                 {myItems.map((item, idx) => {
                   const meta = ITEM_UI_META[item.id] || { tone: 'rose' }
+                  const isPassive = item.id === 'RENT_SHIELD' || item.triggerPhase === 'PASSIVE'
                   const usable =
-                    isMyTurn && isItemPhaseCompatible(gameState.phase, item.triggerPhase)
+                    !isPassive &&
+                    isMyTurn &&
+                    isItemPhaseCompatible(gameState.phase, item.triggerPhase)
                   return (
                     <button
                       type="button"
-                      className={`power-${meta.tone}`}
-                      disabled={!usable}
-                      title={`${item.name}: ${item.description || ''} (${item.triggerPhase})`}
+                      className={`power-${meta.tone} ${isPassive ? 'is-passive-item' : ''}`}
+                      disabled={!usable && !isPassive}
+                      title={
+                        isPassive
+                          ? `${item.name}: Tự động chắn tiền thuê`
+                          : `${item.name}: ${item.description || ''} (${item.triggerPhase})`
+                      }
                       onClick={() => openOrUseItem(item)}
                       key={`${item.id}-${idx}`}
                     >
                       <ItemIcon itemId={item.id} />
                       <span>{item.name}</span>
+                      {isPassive && (
+                        <small className="item-passive-badge">Tự động chắn tiền thuê</small>
+                      )}
                     </button>
                   )
                 })}

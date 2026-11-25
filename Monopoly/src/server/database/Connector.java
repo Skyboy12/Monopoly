@@ -4,6 +4,8 @@ import java.io.BufferedReader;
 import java.io.File;
 import java.io.FileReader;
 import java.io.IOException;
+import java.lang.reflect.InvocationTargetException;
+import java.lang.reflect.Proxy;
 import java.sql.Connection;
 import java.sql.DriverManager;
 import java.sql.PreparedStatement;
@@ -12,12 +14,18 @@ import java.sql.SQLException;
 import java.sql.Statement;
 import java.util.HashMap;
 import java.util.Map;
+import java.util.concurrent.ArrayBlockingQueue;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 public class Connector {
     private static final String DEFAULT_DB_NAME = "monopoly";
-    private static final String JDBC_PARAMS =
+    private static final int MAX_POOL_SIZE = 8;
+    private static final String JDBC_PARAMS_NO_SSL =
             "useSSL=false&allowPublicKeyRetrieval=true&serverTimezone=UTC&connectTimeout=5000&socketTimeout=10000";
+    private static final String JDBC_PARAMS_SSL =
+            "useSSL=true&requireSSL=true&verifyServerCertificate=false&allowPublicKeyRetrieval=true&serverTimezone=UTC&connectTimeout=5000&socketTimeout=10000";
     private static final Map<String, String> DOTENV = loadDotEnv();
+    private static final ArrayBlockingQueue<Connection> CONNECTION_POOL = new ArrayBlockingQueue<>(MAX_POOL_SIZE);
 
     static {
         try {
@@ -111,7 +119,9 @@ public class Connector {
         if (hostPort.isBlank()) {
             hostPort = "localhost:3306";
         }
-        String params = existingQuery.isBlank() ? JDBC_PARAMS : existingQuery;
+        boolean useSsl = "true".equalsIgnoreCase(getEnv("DATABASE_SSL", "false"));
+        String defaultParams = useSsl ? JDBC_PARAMS_SSL : JDBC_PARAMS_NO_SSL;
+        String params = existingQuery.isBlank() ? defaultParams : existingQuery;
         return new ParsedTarget(hostPort, dbName, params);
     }
 
@@ -139,10 +149,93 @@ public class Connector {
     }
 
     public static Connection getConnection() throws SQLException {
+        while (true) {
+            Connection pooled = CONNECTION_POOL.poll();
+            if (pooled == null) {
+                break;
+            }
+            try {
+                if (!pooled.isClosed() && pooled.isValid(2)) {
+                    return wrapPooledConnection(pooled);
+                }
+            } catch (SQLException ignored) {
+            }
+            closeQuietly(pooled);
+        }
+        return wrapPooledConnection(createRawConnection());
+    }
+
+    private static Connection createRawConnection() throws SQLException {
         String url = buildJdbcUrl();
         String user = getEnv("DATABASE_USER", "root");
         String pass = getEnv("DATABASE_PASS", "");
         return DriverManager.getConnection(url, user, pass);
+    }
+
+    private static Connection wrapPooledConnection(Connection raw) {
+        AtomicBoolean closed = new AtomicBoolean(false);
+        return (Connection) Proxy.newProxyInstance(
+                Connection.class.getClassLoader(),
+                new Class<?>[]{Connection.class},
+                (proxy, method, args) -> {
+                    String name = method.getName();
+                    if ("close".equals(name) && method.getParameterCount() == 0) {
+                        if (closed.compareAndSet(false, true)) {
+                            releaseToPool(raw);
+                        }
+                        return null;
+                    }
+                    if ("isClosed".equals(name) && method.getParameterCount() == 0) {
+                        return closed.get() || raw.isClosed();
+                    }
+                    if (closed.get()) {
+                        throw new SQLException("Pooled connection is already closed.");
+                    }
+                    try {
+                        return method.invoke(raw, args);
+                    } catch (InvocationTargetException e) {
+                        Throwable cause = e.getTargetException();
+                        if (cause != null) {
+                            throw cause;
+                        }
+                        throw e;
+                    }
+                }
+        );
+    }
+
+    private static void releaseToPool(Connection raw) {
+        if (raw == null) {
+            return;
+        }
+        try {
+            if (!raw.isClosed()) {
+                if (!raw.getAutoCommit()) {
+                    raw.setAutoCommit(true);
+                }
+                if (raw.isValid(2) && CONNECTION_POOL.offer(raw)) {
+                    return;
+                }
+            }
+        } catch (SQLException ignored) {
+        }
+        closeQuietly(raw);
+    }
+
+    private static void closeQuietly(Connection conn) {
+        if (conn != null) {
+            try {
+                conn.close();
+            } catch (SQLException ignored) {
+            }
+        }
+    }
+
+    public static void closePool() {
+        Connection conn;
+        while ((conn = CONNECTION_POOL.poll()) != null) {
+            closeQuietly(conn);
+        }
     }
 
     public static boolean testConnection() {

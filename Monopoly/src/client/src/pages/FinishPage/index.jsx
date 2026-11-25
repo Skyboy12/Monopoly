@@ -1,14 +1,21 @@
-import { useLocation, useNavigate } from 'react-router-dom'
+import { useEffect, useState } from 'react'
+import { useLocation, useNavigate, useSearchParams } from 'react-router-dom'
 import { Crown, Building2, Coins, LogOut, Trophy } from 'lucide-react'
 import Logo from '../../components/Logo'
 import { PLAYER_COLORS } from '../../data/gameData'
+import api, { parseGamePayload } from '../../plugins/api'
 
 function computeStandings(players, tiles) {
   const tilePriceByOwner = {}
   if (Array.isArray(tiles)) {
     tiles.forEach((tile) => {
       if (tile.ownerId) {
-        tilePriceByOwner[tile.ownerId] = (tilePriceByOwner[tile.ownerId] || 0) + (tile.price || 0)
+        const buildingCost = tile.buildingCost || 50
+        const buildingValue = tile.hasHotel
+          ? 5 * buildingCost
+          : (tile.houseCount || 0) * buildingCost
+        tilePriceByOwner[tile.ownerId] =
+          (tilePriceByOwner[tile.ownerId] || 0) + (tile.price || 0) + buildingValue
       }
     })
   }
@@ -44,10 +51,75 @@ function computeStandings(players, tiles) {
     .map((player, index) => ({ ...player, rank: index + 1 }))
 }
 
+function readStoredMatch(roomIdFromUrl) {
+  try {
+    const raw = sessionStorage.getItem('lastFinishedMatch')
+    if (!raw) return null
+    const parsed = JSON.parse(raw)
+    if (!parsed || !Array.isArray(parsed.players) || parsed.players.length === 0) return null
+    if (roomIdFromUrl && parsed.roomId && parsed.roomId !== roomIdFromUrl) return null
+    return parsed
+  } catch {
+    return null
+  }
+}
+
 export default function FinishPage() {
   const navigate = useNavigate()
   const location = useLocation()
-  const state = location.state || {}
+  const [searchParams] = useSearchParams()
+  const roomIdFromUrl = searchParams.get('roomId') || ''
+
+  const [matchState, setMatchState] = useState(() => {
+    if (Array.isArray(location.state?.players) && location.state.players.length > 0) {
+      return location.state
+    }
+    return readStoredMatch(roomIdFromUrl) || {}
+  })
+  const [loadingMatch, setLoadingMatch] = useState(
+    () =>
+      !(Array.isArray(location.state?.players) && location.state.players.length > 0) &&
+      !readStoredMatch(roomIdFromUrl) &&
+      Boolean(roomIdFromUrl),
+  )
+
+  useEffect(() => {
+    if (Array.isArray(matchState.players) && matchState.players.length > 0) return undefined
+    if (!roomIdFromUrl) return undefined
+    let cancelled = false
+    api
+      .get(`/api/v1/rooms/${encodeURIComponent(roomIdFromUrl)}`)
+      .then((res) => {
+        if (cancelled) return
+        const payload = parseGamePayload(res.data)
+        if (payload && Array.isArray(payload.players) && payload.players.length > 0) {
+          const next = {
+            roomId: payload.roomId || roomIdFromUrl,
+            roomName: payload.roomName,
+            players: payload.players,
+            tiles: payload.tiles,
+            turnId: payload.turnId,
+          }
+          setMatchState(next)
+          try {
+            sessionStorage.setItem('lastFinishedMatch', JSON.stringify(next))
+          } catch {
+            // Ignore storage errors
+          }
+        }
+      })
+      .catch(() => {
+        // Keep empty state fallback
+      })
+      .finally(() => {
+        if (!cancelled) setLoadingMatch(false)
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [roomIdFromUrl, matchState.players])
+
+  const state = matchState
   const rawPlayers = Array.isArray(state.players) ? state.players : []
 
   if (rawPlayers.length === 0) {
@@ -59,14 +131,16 @@ export default function FinishPage() {
             <Logo small />
             <div>
               <span>Trạng thái trận đấu</span>
-              <strong>Không có dữ liệu ván đấu</strong>
+              <strong>{loadingMatch ? 'Đang tải kết quả...' : 'Không có dữ liệu ván đấu'}</strong>
             </div>
           </header>
           <section className="podium-section empty-finish-card">
             <Trophy size={42} className="empty-finish-icon" />
-            <h1>Chưa có kết quả trận đấu</h1>
+            <h1>{loadingMatch ? 'Đang tải bảng tổng kết...' : 'Chưa có kết quả trận đấu'}</h1>
             <p className="muted">
-              Hãy tham gia hoặc hoàn thành một ván đấu để xem bảng xếp hạng tổng kết.
+              {loadingMatch
+                ? 'Vui lòng chờ trong giây lát để đồng bộ dữ liệu trận đấu.'
+                : 'Hãy tham gia hoặc hoàn thành một ván đấu để xem bảng xếp hạng tổng kết.'}
             </p>
             <div className="finish-actions finish-actions-center">
               <button type="button" className="primary finish-primary" onClick={() => navigate('/')}>

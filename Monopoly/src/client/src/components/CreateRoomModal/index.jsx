@@ -49,23 +49,17 @@ export default function CreateRoomModal({
             autoFocus
           />
         </label>
-        <div className="modal-grid">
-          <label>
-            Chế độ chơi
-            <input value="Party Mode" disabled readOnly />
-          </label>
-          <label>
-            Số người tối đa
-            <select
-              value={maxPlayers}
-              onChange={(event) => setMaxPlayers(Number(event.target.value))}
-            >
-              <option value={2}>2 người</option>
-              <option value={3}>3 người</option>
-              <option value={4}>4 người</option>
-            </select>
-          </label>
-        </div>
+        <label>
+          Số người tối đa
+          <select
+            value={maxPlayers}
+            onChange={(event) => setMaxPlayers(Number(event.target.value))}
+          >
+            <option value={2}>2 người</option>
+            <option value={3}>3 người</option>
+            <option value={4}>4 người</option>
+          </select>
+        </label>
         <button type="submit" className="primary wide" disabled={loading}>
           {loading ? 'Đang tạo phòng...' : 'Tạo & vào phòng'}
         </button>

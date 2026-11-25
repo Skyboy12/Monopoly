@@ -10,6 +10,7 @@ import java.io.Serializable;
  * - Truyền tải sự kiện từ Server (DICE_ROLLED, PROPERTY_BOUGHT, TURN_CHANGED)
  */
 public class GameMessage implements Serializable {
+    private static final long serialVersionUID = 1L;
     private String type;
     private String senderId;
     private String roomId;

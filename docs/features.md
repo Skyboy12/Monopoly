@@ -5,7 +5,7 @@ Tài liệu này mô tả các tính năng đã hoàn thiện và đang hoạt �
 ---
 
 ## 1. Lối chơi Cờ Tỷ Phú Chuẩn (Core Gameplay)
-- **Bàn cờ 40 ô đa hình**: Bao gồm ô Bắt đầu (`GO` +$200 khi đi qua), Đất ở (`StreetTile` chia theo nhóm màu, hỗ trợ xây nhà & khách sạn), Nhà ga (`RailroadTile`), Công ty Tiện ích (`UtilityTile`), Ô Thuế (`TaxTile`), Ô Thẻ Cơ hội / Khí vận (`CardTile`), Ô Vào Tù (`GoToJailTile`), Ô Thăm Tù (`JailTile`), và Bãi đỗ xe (`FreeParkingTile`).
+- **Bàn cờ 40 ô đa hình**: Bao gồm ô Bắt đầu (`GO` +$200 khi đi qua), Đất ở (`StreetProperty` chia theo nhóm màu, hỗ trợ xây nhà & khách sạn), Nhà ga (`RailroadProperty`), Công ty Tiện ích (`UtilityProperty`), Ô Thuế (`TaxTile`), Ô Thẻ Cơ hội / Khí vận (`CardTile`), Ô Vào Tù (`GoToJailTile`), Ô Thăm Tù (`JailTile`), và Bãi đỗ xe (`FreeParkingTile`).
 - **Authoritative Server (`GameEngine`)**:
   - Xúc xắc (`Dice`) được sinh bằng `SecureRandom` trên server.
   - Quản lý chặt chẽ pha lượt (`TurnPhase`: `AWAITING_ROLL`, `RESOLVING_ACTION`, `AWAITING_DECISION`, `FINISHED`).
@@ -17,6 +17,7 @@ Tài liệu này mô tả các tính năng đã hoàn thiện và đang hoạt �
 Mỗi người chơi sở hữu túi đồ `Inventory` (sức chứa mặc định 5 ô) với các vật phẩm kích hoạt theo pha:
 - **Xúc xắc Thần kỳ (`MagicDiceItem` - `PRE_ROLL`)**: Cho phép chọn trước tổng số bước di chuyển từ 2 đến 12; `GameEngine.performRoll()` tự động tiêu thụ `forcedDiceValue` để tạo kết quả xúc xắc khớp với giá trị đã chọn.
 - **Khiên Hộ mệnh (`RentShieldItem` - `ON_LAND`)**: Tự động kích hoạt khi người chơi đáp xuống ô đất của đối thủ (chưa thế chấp), miễn 100% tiền thuê lượt đó và tiêu hao vật phẩm.
+- **Cưỡng chế Thu mua (`HostileTakeoverItem` - `AWAITING_DECISION`)**: Trả tiền niêm yết cộng giá trị công trình để mua đứt một ô đất của đối thủ.
 - **Thuốc nổ (`DynamiteItem` - `AWAITING_DECISION`)**: Phá hủy công trình trên ô đất mục tiêu.
 - **Hoán đổi Vận mệnh (`FortuneSwapItem` - `AWAITING_DECISION`)**: Hoán đổi vị trí hoặc tài sản với người chơi khác.
 - **Lệnh Truy nã (`ArrestWarrantItem` - `AWAITING_DECISION`)**: Đưa đối thủ vào tù.
@@ -35,6 +36,6 @@ Mỗi người chơi sở hữu túi đồ `Inventory` (sức chứa mặc đị
 ---
 
 ## 4. Bot AI & Chơi Đa Người Chơi (Multiplayer)
-- **Bot AI (`BotController`, `BotStrategy`)**: Tự động đánh giá và thực hiện tung xúc xắc, mua đất, xây nhà khi đến lượt hoặc khi người chơi bị ngắt kết nối/hết giờ.
+- **Bot AI (`engine/bot`: `BotController`, `BotStrategy`, `DefaultBotStrategy`)**: Tự động đánh giá và thực hiện tung xúc xắc, nộp bảo lãnh, mua đất, nâng cấp nhà/khách sạn khi đến lượt hoặc khi người chơi bị ngắt kết nối/hết giờ.
 - **WebSocket STOMP & REST API**: Đồng bộ trạng thái phòng chơi thời gian thực qua `GameWebSocketController` và `RoomRestController`.
 - **Lưu trữ & Bảo mật**: Kết nối MySQL (`Connector`, `UserRepository`) lưu thông tin người dùng, kết hợp `cloudflare-firewall` bảo vệ endpoint.

@@ -4,6 +4,7 @@ import model.GameRoom;
 import model.Player;
 import model.PlayerStatus;
 import model.tile.PropertyTile;
+import model.tile.StreetProperty;
 
 /**
  * Gậy Đổi Vận (Fortune Swap):
@@ -23,7 +24,16 @@ public class FortuneSwapItem extends Item {
     private int calculateTotalWealth(Player player) {
         int wealth = player.getMoney();
         for (PropertyTile prop : player.getOwnedProperties()) {
-            wealth += prop.getPrice();
+            wealth += prop.isMortgaged() ? (prop.getPrice() / 2) : prop.getPrice();
+            if (prop instanceof StreetProperty) {
+                StreetProperty sp = (StreetProperty) prop;
+                int buildingCost = sp.getBuildingCost();
+                if (sp.isHasHotel()) {
+                    wealth += 5 * buildingCost;
+                } else {
+                    wealth += sp.getHouseCount() * buildingCost;
+                }
+            }
         }
         return wealth;
     }
@@ -32,7 +42,7 @@ public class FortuneSwapItem extends Item {
         Player richest = null;
         int maxWealth = Integer.MIN_VALUE;
         for (Player p : room.getPlayers()) {
-            if (p == user || p.getStatus() == PlayerStatus.BANKRUPT) {
+            if (p == user || p.getStatus() != PlayerStatus.ACTIVE) {
                 continue;
             }
             int wealth = calculateTotalWealth(p);

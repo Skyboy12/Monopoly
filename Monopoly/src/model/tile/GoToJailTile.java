@@ -2,7 +2,6 @@ package model.tile;
 
 import model.GameRoom;
 import model.Player;
-import model.PlayerStatus;
 
 /**
  * Ô Vào Tù (Go To Jail).
@@ -20,13 +19,10 @@ public class GoToJailTile extends Tile {
 
     @Override
     public void onLand(Player player, GameRoom room) {
-        if (player == null) {
+        if (player == null || isFrozen()) {
             return;
         }
-        // 1. Cập nhật vị trí người chơi về JAIL_INDEX (10)
-        player.setPosition(JAIL_INDEX);
-
-        // 2. Đổi trạng thái người chơi sang PlayerStatus.IN_JAIL
-        player.setStatus(PlayerStatus.IN_JAIL);
+        // Đưa thẳng người chơi về JAIL_INDEX (10), đặt IN_JAIL và reset turnsInJail = 0
+        player.sendToJail(JAIL_INDEX);
     }
 }

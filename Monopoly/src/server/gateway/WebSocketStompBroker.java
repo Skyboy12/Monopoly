@@ -28,6 +28,9 @@ import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.Supplier;
 
@@ -50,6 +53,7 @@ public class WebSocketStompBroker {
     private final ConcurrentHashMap<String, CopyOnWriteArrayList<SubscriptionEntry>> destinationSubscribers =
             new ConcurrentHashMap<>();
     private final AtomicLong messageSeq = new AtomicLong(1);
+    private final ScheduledExecutorService heartbeatScheduler;
 
     public WebSocketStompBroker(JwtTokenProvider jwtTokenProvider,
                                 RoomManagerService roomManagerService,
@@ -57,6 +61,12 @@ public class WebSocketStompBroker {
         this.jwtTokenProvider = jwtTokenProvider;
         this.roomManagerService = roomManagerService;
         this.wsController = wsController;
+        this.heartbeatScheduler = Executors.newSingleThreadScheduledExecutor(r -> {
+            Thread t = new Thread(r, "monopoly-ws-heartbeat");
+            t.setDaemon(true);
+            return t;
+        });
+        this.heartbeatScheduler.scheduleAtFixedRate(this::runHeartbeatTick, 5, 5, TimeUnit.SECONDS);
     }
 
     public static boolean isDirectCommandInProgress() {
@@ -136,7 +146,8 @@ public class WebSocketStompBroker {
                 engine,
                 roomManagerService.getHostUserId(roomId),
                 roomManagerService.getTurnDeadlineEpochMs(roomId),
-                roomManagerService.getRoomLogs(roomId)
+                roomManagerService.getRoomLogs(roomId),
+                roomManagerService.getTurnTimeoutSeconds()
         );
         broadcastToRoom(roomId, snapshot);
     }
@@ -150,6 +161,7 @@ public class WebSocketStompBroker {
     }
 
     public void closeAll() {
+        heartbeatScheduler.shutdownNow();
         for (StompSession session : new ArrayList<>(sessions)) {
             try {
                 sendCloseFrame(session, 1001, "Server shutting down");
@@ -237,6 +249,7 @@ public class WebSocketStompBroker {
             for (int i = 0; i < payloadLen; i++) {
                 payload[i] = (byte) (payload[i] ^ maskKey[i & 3]);
             }
+            session.lastReadMs = System.currentTimeMillis();
 
             switch (opcode) {
                 case 0x8 -> { // CLOSE
@@ -429,17 +442,44 @@ public class WebSocketStompBroker {
 
         session.authenticated = true;
         session.userId = userId;
+        session.rawAuthToken = authHeader;
+
+        int[] hb = negotiateHeartbeat(getHeaderCaseInsensitive(headers, "heart-beat"));
+        session.serverHbMs = hb[0];
+        session.clientHbMs = hb[1];
 
         String acceptVersion = getHeaderCaseInsensitive(headers, "accept-version");
         String version = negotiateStompVersion(acceptVersion);
 
         String connected = "CONNECTED\n"
                 + "version:" + version + "\n"
-                + "heart-beat:0,0\n"
+                + "heart-beat:" + hb[0] + "," + hb[1] + "\n"
                 + "session:" + session.sessionId + "\n"
                 + "user-name:" + userId + "\n"
                 + "\n\0";
         sendTextFrame(session, connected);
+    }
+
+    private static int[] negotiateHeartbeat(String headerVal) {
+        if (headerVal == null || headerVal.isBlank()) {
+            return new int[]{0, 0};
+        }
+        String[] parts = headerVal.trim().split(",");
+        if (parts.length != 2) {
+            return new int[]{0, 0};
+        }
+        try {
+            int cx = Math.max(0, Integer.parseInt(parts[0].trim()));
+            int cy = Math.max(0, Integer.parseInt(parts[1].trim()));
+            if (cx == 0 && cy == 0) {
+                return new int[]{0, 0};
+            }
+            int sx = cy > 0 ? Math.max(cy, 10_000) : 0;
+            int sy = cx > 0 ? Math.max(cx, 10_000) : 0;
+            return new int[]{sx, sy};
+        } catch (NumberFormatException e) {
+            return new int[]{0, 0};
+        }
     }
 
     private void handleSubscribe(StompSession session, Map<String, String> headers) throws IOException {
@@ -468,6 +508,29 @@ public class WebSocketStompBroker {
             }
         }
 
+        if (destination.startsWith("/topic/room/")) {
+            String roomId = destination.substring("/topic/room/".length());
+            if (!roomId.isBlank() && !roomId.contains("/")) {
+                GameRoom room = roomManagerService.getRoom(roomId);
+                if (room != null) {
+                    boolean isMember = false;
+                    synchronized (room) {
+                        for (Player p : room.getPlayers()) {
+                            if (session.userId.equals(p.getId())) {
+                                isMember = true;
+                                break;
+                            }
+                        }
+                    }
+                    if (!isMember) {
+                        sendStompErrorAndClose(session, "Forbidden subscription", receipt,
+                                "{\"error\":\"FORBIDDEN_SUBSCRIPTION\",\"message\":\"Bạn không phải thành viên của phòng này.\"}");
+                        return;
+                    }
+                }
+            }
+        }
+
         SubscriptionEntry entry = new SubscriptionEntry(session, subId, destination);
         SubscriptionEntry previous = session.subscriptions.put(subId, entry);
         if (previous != null) {
@@ -490,7 +553,8 @@ public class WebSocketStompBroker {
                             engine,
                             roomManagerService.getHostUserId(roomId),
                             roomManagerService.getTurnDeadlineEpochMs(roomId),
-                            roomManagerService.getRoomLogs(roomId)
+                            roomManagerService.getRoomLogs(roomId),
+                            roomManagerService.getTurnTimeoutSeconds()
                     );
                     sendStompMessage(entry, SimpleJson.toJson(snapshot));
                 }
@@ -516,6 +580,12 @@ public class WebSocketStompBroker {
         String destination = getHeaderCaseInsensitive(headers, "destination");
         String receipt = getHeaderCaseInsensitive(headers, "receipt");
         String userId = session.userId;
+
+        if (session.rawAuthToken == null || !jwtTokenProvider.validateToken(session.rawAuthToken)) {
+            sendStompErrorAndClose(session, "Unauthorized", receipt,
+                    "{\"error\":\"UNAUTHORIZED\",\"message\":\"Token JWT đã hết hạn hoặc không hợp lệ.\"}");
+            return;
+        }
 
         if (receipt != null && !receipt.isBlank()) {
             sendReceipt(session, receipt);
@@ -578,6 +648,10 @@ public class WebSocketStompBroker {
                     }
                     case "end-turn" -> wsController.handleEndTurn(roomId, userId, turnId, engine);
                     case "pay-bail" -> wsController.handlePayBail(roomId, userId, turnId, engine);
+                    case "upgrade-property" -> {
+                        int tileIndex = SimpleJson.getInt(bodyMap, "tileIndex", -1);
+                        yield wsController.handleUpgradeProperty(roomId, userId, turnId, tileIndex, engine);
+                    }
                     default -> new GameMessage(
                             "ERROR", userId, roomId, turnId,
                             "{\"error\":\"UNKNOWN_ACTION\",\"message\":\"Hành động STOMP không được hỗ trợ.\"}"
@@ -645,6 +719,23 @@ public class WebSocketStompBroker {
                                 actorName,
                                 tileName != null ? tileName : "tài sản",
                                 price)
+                );
+            }
+            case "PROPERTY_UPGRADED" -> {
+                String ownerId = SimpleJson.getString(payloadMap, "ownerId");
+                String actorName = resolvePlayerName(roomId, ownerId != null ? ownerId : result.getSenderId());
+                String tileName = SimpleJson.getString(payloadMap, "tileName");
+                int cost = SimpleJson.getInt(payloadMap, "cost", 0);
+                boolean hasHotel = Boolean.TRUE.equals(SimpleJson.getBoolean(payloadMap, "hasHotel"));
+                int houseCount = SimpleJson.getInt(payloadMap, "houseCount", 0);
+                String levelLabel = hasHotel ? "khách sạn" : ("nhà cấp " + houseCount);
+                roomManagerService.appendRoomLog(
+                        roomId,
+                        String.format("%s đã nâng cấp %s lên %s ($%d).",
+                                actorName,
+                                tileName != null ? tileName : "ô đất",
+                                levelLabel,
+                                cost)
                 );
             }
             case "ITEM_USED" -> {
@@ -818,6 +909,44 @@ public class WebSocketStompBroker {
                 return;
             }
             writeFrameUnchecked(session.out, opcode, payload);
+            session.lastWriteMs = System.currentTimeMillis();
+        }
+    }
+
+    private void runHeartbeatTick() {
+        long now = System.currentTimeMillis();
+        for (StompSession session : new ArrayList<>(sessions)) {
+            if (session.closed || session.socket.isClosed()) {
+                cleanupSession(session);
+                continue;
+            }
+            long deadTimeout = (session.clientHbMs > 0)
+                    ? Math.max(45_000L, session.clientHbMs * 3L)
+                    : 90_000L;
+            if (now - session.lastReadMs > deadTimeout) {
+                try {
+                    sendCloseFrame(session, 1001, "Heartbeat timeout");
+                } catch (IOException ignored) {
+                }
+                cleanupSession(session);
+                try {
+                    session.socket.close();
+                } catch (IOException ignored) {
+                }
+                continue;
+            }
+            if (!session.authenticated) {
+                continue;
+            }
+            try {
+                if (session.serverHbMs > 0 && now - session.lastWriteMs >= session.serverHbMs) {
+                    sendTextFrame(session, "\n");
+                } else if (session.serverHbMs == 0 && now - session.lastWriteMs >= 25_000L) {
+                    sendWebSocketFrame(session, 0x09, new byte[0]);
+                }
+            } catch (IOException ignored) {
+                cleanupSession(session);
+            }
         }
     }
 
@@ -981,6 +1110,11 @@ public class WebSocketStompBroker {
         private final Map<String, SubscriptionEntry> subscriptions = new ConcurrentHashMap<>();
         private volatile boolean authenticated = false;
         private volatile String userId = null;
+        private volatile String rawAuthToken = null;
+        private volatile long lastReadMs = System.currentTimeMillis();
+        private volatile long lastWriteMs = System.currentTimeMillis();
+        private volatile int clientHbMs = 0;
+        private volatile int serverHbMs = 0;
         private volatile boolean closed = false;
         private volatile boolean closeSent = false;
 

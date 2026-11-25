@@ -85,4 +85,8 @@ public class CloudflareOriginFilter {
     public boolean isProtectionEnabled() {
         return protectionEnabled;
     }
+
+    public String getExpectedSecretKey() {
+        return expectedSecretKey;
+    }
 }

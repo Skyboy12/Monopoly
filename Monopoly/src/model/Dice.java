@@ -13,9 +13,11 @@ public class Dice {
     private final SecureRandom random = new SecureRandom();
     private int dice1;
     private int dice2;
+    private boolean forced = false;
 
     public void roll() {
         // Sinh ngẫu nhiên dice1, dice2 từ 1 đến 6 bằng SecureRandom
+        this.forced = false;
         this.dice1 = random.nextInt(6) + 1;
         this.dice2 = random.nextInt(6) + 1;
     }
@@ -33,6 +35,7 @@ public class Dice {
         int maxD1 = Math.min(6, total - 1);
         this.dice1 = minD1 + random.nextInt(maxD1 - minD1 + 1);
         this.dice2 = total - this.dice1;
+        this.forced = true;
     }
 
     public int getDice1() {
@@ -47,7 +50,11 @@ public class Dice {
         return this.dice1 + this.dice2;
     }
 
+    public boolean isForced() {
+        return this.forced;
+    }
+
     public boolean isDouble() {
-        return this.dice1 > 0 && this.dice1 == this.dice2;
+        return !this.forced && this.dice1 > 0 && this.dice1 == this.dice2;
     }
 }

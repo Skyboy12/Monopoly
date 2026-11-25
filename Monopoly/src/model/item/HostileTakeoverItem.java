@@ -3,6 +3,7 @@ package model.item;
 import model.GameRoom;
 import model.Player;
 import model.tile.PropertyTile;
+import model.tile.StreetProperty;
 import model.tile.Tile;
 
 /**
@@ -20,6 +21,19 @@ public class HostileTakeoverItem extends Item {
         );
     }
 
+    public int getTakeoverCost(PropertyTile prop) {
+        if (prop == null) {
+            return 0;
+        }
+        int buildingValue = 0;
+        if (prop instanceof StreetProperty) {
+            StreetProperty sp = (StreetProperty) prop;
+            int buildingCost = sp.getBuildingCost();
+            buildingValue = sp.isHasHotel() ? (5 * buildingCost) : (sp.getHouseCount() * buildingCost);
+        }
+        return prop.getPrice() + buildingValue;
+    }
+
     @Override
     public boolean canUse(Player user, GameRoom room, ItemTargetContext context) {
         if (user == null || room == null || room.getBoard() == null || context == null
@@ -31,7 +45,7 @@ public class HostileTakeoverItem extends Item {
             return false;
         }
         PropertyTile prop = (PropertyTile) tile;
-        return prop.hasOwner() && prop.getOwner() != user && user.getMoney() >= prop.getPrice();
+        return prop.hasOwner() && prop.getOwner() != user && user.getMoney() >= getTakeoverCost(prop);
     }
 
     @Override
@@ -41,7 +55,7 @@ public class HostileTakeoverItem extends Item {
         }
         PropertyTile prop = (PropertyTile) room.getBoard().getTile(context.getTargetTileIndex());
         Player oldOwner = prop.getOwner();
-        if (!user.pay(prop.getPrice(), oldOwner)) {
+        if (!user.pay(getTakeoverCost(prop), oldOwner)) {
             return false;
         }
         oldOwner.transferProperty(prop, user);

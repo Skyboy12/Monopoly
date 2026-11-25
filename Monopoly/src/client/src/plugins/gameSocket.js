@@ -8,22 +8,35 @@ export function createGameSocket({
   userId,
   onConnect,
   onDisconnect,
+  onStatusChange,
+  onAuthExpired,
   onMessage,
   onError,
 }) {
   const configuredUrl = import.meta.env.VITE_WS_URL
   const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:'
   const wsUrl = configuredUrl || `${protocol}//${location.host}/ws`
-  const token = localStorage.getItem('accessToken')
+  const initialToken = localStorage.getItem('accessToken')
 
   const noopSender = () => false
 
-  if (!token) {
-    onError?.('Thiếu token xác thực để kết nối WebSocket.')
+  const handleUnauthorized = (msg) => {
+    onStatusChange?.('unauthorized')
+    localStorage.removeItem('accessToken')
+    localStorage.removeItem('currentUser')
+    if (msg) {
+      onError?.(msg)
+    }
+    onAuthExpired?.()
+  }
+
+  if (!initialToken) {
+    handleUnauthorized('Thiếu token xác thực để kết nối WebSocket.')
     onDisconnect?.()
     return {
       sendRoll: noopSender,
       sendBuy: noopSender,
+      sendUpgrade: noopSender,
       sendItem: noopSender,
       sendEndTurn: noopSender,
       sendPayBail: noopSender,
@@ -32,17 +45,33 @@ export function createGameSocket({
   }
 
   let active = true
+  let hasConnectedOnce = false
 
   const client = new Client({
     brokerURL: wsUrl,
     reconnectDelay: 3000,
     heartbeatIncoming: 10000,
     heartbeatOutgoing: 10000,
-    connectHeaders: { Authorization: `Bearer ${token}` },
+    connectHeaders: { Authorization: `Bearer ${initialToken}` },
   })
+
+  client.beforeConnect = () => {
+    if (!active) return
+    const latestToken = localStorage.getItem('accessToken')
+    if (!latestToken) {
+      active = false
+      client.deactivate()
+      handleUnauthorized('Phiên đăng nhập đã hết hạn.')
+      return
+    }
+    client.connectHeaders = { Authorization: `Bearer ${latestToken}` }
+    onStatusChange?.(hasConnectedOnce ? 'reconnecting' : 'connecting')
+  }
 
   client.onConnect = () => {
     if (!active) return
+    hasConnectedOnce = true
+    onStatusChange?.('online')
     onConnect?.()
 
     if (roomId) {
@@ -67,11 +96,15 @@ export function createGameSocket({
   }
 
   client.onDisconnect = () => {
+    if (active) {
+      onStatusChange?.(hasConnectedOnce ? 'reconnecting' : 'connecting')
+    }
     onDisconnect?.()
   }
 
   client.onWebSocketClose = () => {
     if (active) {
+      onStatusChange?.(hasConnectedOnce ? 'reconnecting' : 'connecting')
       onDisconnect?.()
     }
   }
@@ -88,10 +121,20 @@ export function createGameSocket({
         msg = frame.body
       }
     }
+    const rawError = `${frame.headers?.message || ''} ${frame.body || ''} ${msg}`
+    if (/UNAUTHORIZED/i.test(rawError)) {
+      active = false
+      client.deactivate()
+      handleUnauthorized(msg)
+      return
+    }
     onError?.(msg)
   }
 
   client.onWebSocketError = () => {
+    if (active) {
+      onStatusChange?.(hasConnectedOnce ? 'reconnecting' : 'connecting')
+    }
     onError?.('Không thể kết nối WebSocket tới máy chủ.')
   }
 
@@ -108,6 +151,8 @@ export function createGameSocket({
       send(`/app/room/${roomId}/roll-dice`, { roomId, playerId: userId, turnId }),
     sendBuy: (turnId, tileIndex) =>
       send(`/app/room/${roomId}/buy-property`, { roomId, playerId: userId, turnId, tileIndex }),
+    sendUpgrade: (turnId, tileIndex) =>
+      send(`/app/room/${roomId}/upgrade-property`, { roomId, playerId: userId, turnId, tileIndex }),
     sendItem: (turnId, itemId, context = {}) =>
       send(`/app/room/${roomId}/use-item`, { roomId, playerId: userId, turnId, itemId, context }),
     sendEndTurn: (turnId) =>

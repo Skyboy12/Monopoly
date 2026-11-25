@@ -6,6 +6,7 @@ import model.GameRoom;
 import model.Player;
 import model.RoomStatus;
 import network.GameMessage;
+import server.gateway.SimpleJson;
 import server.service.RoomManagerService;
 
 import java.util.List;
@@ -53,8 +54,9 @@ public class RoomRestController {
         if (hostUserId == null || hostUserId.isBlank()) {
             return errorMessage(null, null, 0, "UNAUTHORIZED", "Thiếu thông tin người tạo phòng.");
         }
-        if (roomName == null || roomName.isBlank()) {
-            return errorMessage(null, hostUserId, 0, "INVALID_ROOM_NAME", "Tên phòng không được để trống.");
+        String cleanRoomName = (roomName == null) ? "" : roomName.trim();
+        if (cleanRoomName.isEmpty() || cleanRoomName.length() > 60) {
+            return errorMessage(null, hostUserId, 0, "INVALID_ROOM_NAME", "Tên phòng phải có từ 1 đến 60 ký tự.");
         }
         if (maxPlayers < 2 || maxPlayers > 4) {
             return errorMessage(null, hostUserId, 0, "INVALID_MAX_PLAYERS", "Số người chơi tối đa phải từ 2 đến 4.");
@@ -128,11 +130,39 @@ public class RoomRestController {
             return errorMessage(roomId, userId, 0, "ROOM_NOT_FOUND", "Không tìm thấy phòng chơi.");
         }
 
+        boolean isPlaying;
+        synchronized (room) {
+            isPlaying = (room.getStatus() == RoomStatus.PLAYING);
+        }
+
+        if (isPlaying) {
+            GameEngine engine = roomManagerService.getEngine(roomId);
+            if (engine != null) {
+                ActionResult result = engine.surrenderPlayer(roomId, userId, "LEAVE-" + UUID.randomUUID());
+                if (!result.isSuccess()) {
+                    synchronized (room) {
+                        return errorMessage(roomId, userId, room.getTurnId(), result.getCode(), result.getMessage());
+                    }
+                }
+                roomManagerService.touchRoom(roomId);
+                synchronized (room) {
+                    return new GameMessage(
+                            "ROOM_LEFT",
+                            userId,
+                            room.getId(),
+                            room.getTurnId(),
+                            toRoomSummaryDtoJson(room)
+                    );
+                }
+            }
+        }
+
         synchronized (room) {
             boolean removed = room.removePlayer(userId);
             if (!removed) {
                 return errorMessage(roomId, userId, room.getTurnId(), "PLAYER_NOT_IN_ROOM", "Người chơi không có trong phòng.");
             }
+            roomManagerService.touchRoom(roomId);
 
             // Nếu phòng trống hoàn toàn -> xóa phòng khỏi bộ nhớ
             if (room.getPlayers().isEmpty()) {
@@ -215,44 +245,19 @@ public class RoomRestController {
         }
         return String.format(
                 "{\"roomId\":\"%s\",\"roomName\":\"%s\",\"status\":\"%s\",\"currentPlayers\":%d,\"maxPlayers\":%d,\"hostId\":\"%s\",\"hostName\":\"%s\",\"turnId\":%d}",
-                escape(room.getId()),
-                escape(room.getName()),
+                SimpleJson.escape(room.getId()),
+                SimpleJson.escape(room.getName()),
                 room.getStatus().name(),
                 room.getPlayers().size(),
                 room.getMaxPlayers(),
-                escape(safeHostId),
-                escape(hostName),
+                SimpleJson.escape(safeHostId),
+                SimpleJson.escape(hostName),
                 room.getTurnId()
         );
     }
 
     private GameMessage errorMessage(String roomId, String senderId, int turnId, String code, String message) {
-        String payload = String.format("{\"error\":\"%s\",\"message\":\"%s\"}", escape(code), escape(message));
+        String payload = String.format("{\"error\":\"%s\",\"message\":\"%s\"}", SimpleJson.escape(code), SimpleJson.escape(message));
         return new GameMessage("ERROR", senderId, roomId, turnId, payload);
-    }
-
-    private static String escape(String s) {
-        if (s == null) return "";
-        StringBuilder sb = new StringBuilder(s.length() + 8);
-        for (int i = 0; i < s.length(); i++) {
-            char c = s.charAt(i);
-            switch (c) {
-                case '\\' -> sb.append("\\\\");
-                case '"' -> sb.append("\\\"");
-                case '\b' -> sb.append("\\b");
-                case '\f' -> sb.append("\\f");
-                case '\n' -> sb.append("\\n");
-                case '\r' -> sb.append("\\r");
-                case '\t' -> sb.append("\\t");
-                default -> {
-                    if (c < 0x20) {
-                        sb.append(String.format("\\u%04x", (int) c));
-                    } else {
-                        sb.append(c);
-                    }
-                }
-            }
-        }
-        return sb.toString();
     }
 }

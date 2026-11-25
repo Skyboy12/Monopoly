@@ -96,7 +96,7 @@ public class FullSystemTestRunner {
 
     private void runAll() {
         System.out.println("==================================================================");
-        System.out.println("  MONOPOLY FULL SYSTEM TEST RUNNER (PURE JDK - SUITES A..D)");
+        System.out.println("  MONOPOLY FULL SYSTEM TEST RUNNER (PURE JDK - SUITES A..E)");
         System.out.println("==================================================================");
 
         // Suite A — Core Domain OOP & Engine
@@ -138,6 +138,26 @@ public class FullSystemTestRunner {
                 this::testStompMultiplayerAndAntiCheat);
         runTest("Suite D", "Snapshot timer/logs sync, ROOM_JOINED/ROOM_LEFT & Timeout/Bot broadcasts",
                 this::testStompRoomLeaveTimeoutAndBotBroadcasts);
+
+        // Suite E — Regression Suite (GO/Bankruptcy, Jail, Bot Concurrency, Upgrade, Leave, WS Heartbeat/Reconnect/Auth, Prod JWT)
+        runTest("Suite E", "Direct GO landing (35+5->0) awards $200 & negative steps award $0",
+                this::testSuiteE_GoLandingAndNegativeSteps);
+        runTest("Suite E", "declareBankruptcy(null) resets houses/hotel/mortgaged & getOwnedProperties unmodifiable",
+                this::testSuiteE_BankruptcyNullResetAndUnmodifiableOwnedProps);
+        runTest("Suite E", "Jail roll/skip 3 turns auto-bail/bankruptcy, Bot in Jail & payBail reclaims TIMEOUT",
+                this::testSuiteE_JailMechanicsAndPayBailReclaim);
+        runTest("Suite E", "Concurrent BotController.processBotTurn + human actions/snapshot zero deadlock",
+                this::testSuiteE_ConcurrentBotAndHumanNoDeadlock);
+        runTest("Suite E", "StreetProperty upgrade via STOMP /upgrade-property -> PROPERTY_UPGRADED + houseCount",
+                this::testSuiteE_StompUpgradeProperty);
+        runTest("Suite E", "Mid-game POST /leave surrenders leaver, clears properties & finishes 2-player match",
+                this::testSuiteE_MidGameLeaveSurrenderAndFinish);
+        runTest("Suite E", "STOMP heartbeat negotiation, WS reconnect snapshot, non-member subscribe ERROR & PROD JWT_SECRET",
+                this::testSuiteE_StompHeartbeatReconnectAuthAndProdJwt);
+        runTest("Suite E", "Timeout during AWAITING_DECISION (doubles/unowned), actionPhase & ensureBotTurnResolved",
+                this::testSuiteE_TimeoutInAwaitingDecisionAndEnsureBotResolved);
+        runTest("Suite E", "Dedicated player.isBot() auto-plays without 30s wait or BOT_ALREADY_ACTIVE",
+                this::testSuiteE_DedicatedBotAutoPlaysWithoutWaiting30s);
 
         printSummaryAndExit();
     }
@@ -1035,10 +1055,10 @@ public class FullSystemTestRunner {
                 Map<String, Object> staleErr = awaitGameError(activeClient, activeErrDest, 4000);
                 assertEquals("STALE_TURN", staleErr.get("error"), "Stale turnId rejected with STALE_TURN");
 
-                // 3b. Pay bail while ACTIVE -> NOT_IN_JAIL
+                // 3b. Pay bail while ACTIVE -> PLAYER_NOT_IN_JAIL
                 activeClient.send("/app/room/" + roomId + "/pay-bail", "{\"turnId\":" + turnId + "}");
                 Map<String, Object> bailErr = awaitGameError(activeClient, activeErrDest, 4000);
-                assertEquals("NOT_IN_JAIL", bailErr.get("error"), "Pay bail when ACTIVE rejected with NOT_IN_JAIL");
+                assertEquals("PLAYER_NOT_IN_JAIL", bailErr.get("error"), "Pay bail when ACTIVE rejected with PLAYER_NOT_IN_JAIL");
 
                 // 3c. Forbidden subscribe to another player's error queue -> STOMP ERROR
                 String otherUserId = activeId.equals(p1.userId) ? p2.userId : p1.userId;
@@ -1276,6 +1296,622 @@ public class FullSystemTestRunner {
     }
 
     // =========================================================================
+    // SUITE E: REGRESSION SUITE (GO, JAIL, BOT CONCURRENCY, UPGRADE, LEAVE, WS)
+    // =========================================================================
+
+    private void testSuiteE_GoLandingAndNegativeSteps() {
+        GameRoom room = new GameRoom("suite-e-go", "GO Room", 2);
+        Player p = new Player("e-go-1", "GO Tester", 1500);
+
+        // 35 + 5 -> 0: move() must NOT award $200; GoTile.onLand() awards $200 once.
+        p.setPosition(35);
+        p.move(5);
+        assertEquals(0, p.getPosition(), "35 + 5 wraps to 0");
+        assertEquals(1500, p.getMoney(), "Landing directly on GO does not award $200 inside move()");
+        new GoTile(0, "GO").onLand(p, room);
+        assertEquals(1700, p.getMoney(), "Total GO reward on 35+5->0 is $200 (not $400)");
+
+        // 35 + 7 -> 2: passing GO strictly awards +$200 in move()
+        p.setPosition(35);
+        p.move(7);
+        assertEquals(2, p.getPosition(), "35 + 7 wraps to 2");
+        assertEquals(1900, p.getMoney(), "Passing GO (35+7->2) awards +$200");
+
+        // Negative steps must award $0
+        p.setPosition(5);
+        p.move(-10);
+        assertEquals(35, p.getPosition(), "5 - 10 wraps to 35");
+        assertEquals(1900, p.getMoney(), "Negative steps award $0");
+
+        // IN_JAIL player moving must not receive GO bonus
+        p.sendToJail(10);
+        p.move(35);
+        assertEquals(1900, p.getMoney(), "IN_JAIL move awards $0 GO bonus");
+    }
+
+    private void testSuiteE_BankruptcyNullResetAndUnmodifiableOwnedProps() {
+        Player p = new Player("e-bk-1", "Bankrupt Tester", 1500);
+        StreetProperty s1 = new StreetProperty(1, "Phố Huế", 60, "BROWN", 10);
+        StreetProperty s2 = new StreetProperty(3, "Hàng Bài", 60, "BROWN", 12);
+        p.buyProperty(s1);
+        p.buyProperty(s2);
+
+        s1.setHouseCount(2);
+        s1.setMortgaged(true);
+        s2.setHasHotel(true);
+        s2.setMortgaged(false);
+
+        boolean threwUnsupported = false;
+        try {
+            p.getOwnedProperties().add(s1);
+        } catch (UnsupportedOperationException expected) {
+            threwUnsupported = true;
+        }
+        assertTrue(threwUnsupported, "Player.getOwnedProperties() must be unmodifiable");
+
+        p.declareBankruptcy(null);
+        assertEquals(PlayerStatus.BANKRUPT, p.getStatus(), "Player becomes BANKRUPT");
+        assertTrue(p.getOwnedProperties().isEmpty(), "Owned properties cleared on bankruptcy");
+
+        assertTrue(s1.getOwner() == null, "s1 owner cleared");
+        assertFalse(s1.isMortgaged(), "s1 mortgaged flag reset");
+        assertEquals(0, s1.getHouseCount(), "s1 houseCount reset to 0");
+        assertFalse(s1.isHasHotel(), "s1 hasHotel reset to false");
+
+        assertTrue(s2.getOwner() == null, "s2 owner cleared");
+        assertFalse(s2.isMortgaged(), "s2 mortgaged flag reset");
+        assertEquals(0, s2.getHouseCount(), "s2 houseCount reset to 0");
+        assertFalse(s2.isHasHotel(), "s2 hasHotel reset to false");
+    }
+
+    private void testSuiteE_JailMechanicsAndPayBailReclaim() {
+        // 1. Rolling in Jail for 3 turns -> auto-bail ($50) on 3rd turn
+        GameRoom r1 = new GameRoom("e-jail-1", "Jail Roll Room", 2);
+        Player p1 = new Player("j1", "Prisoner 1", 1500);
+        Player p2 = new Player("j2", "Guard 2", 1500);
+        r1.addPlayer(p1);
+        r1.addPlayer(p2);
+        GameEngine e1 = new GameEngine(r1);
+        assertTrue(e1.startGame(), "Start r1");
+
+        p1.sendToJail(10);
+        for (int i = 1; i <= 2; i++) {
+            assertEquals(p1, r1.getCurrentPlayer(), "p1 turn " + i);
+            r1.setForcedDiceValue(3); // forced -> isDouble() == false
+            assertTrue(e1.rollDice("e-jail-1", p1.getId(), r1.getTurnId(), "jr-" + i).isSuccess(), "p1 jail roll " + i);
+            assertEquals(PlayerStatus.IN_JAIL, p1.getStatus(), "p1 stays IN_JAIL after roll " + i);
+
+            assertEquals(p2, r1.getCurrentPlayer(), "p2 turn " + i);
+            r1.setForcedDiceValue(3);
+            assertTrue(e1.rollDice("e-jail-1", p2.getId(), r1.getTurnId(), "p2r-" + i).isSuccess(), "p2 roll " + i);
+            assertTrue(e1.endTurn("e-jail-1", p2.getId(), r1.getTurnId(), "p2e-" + i).isSuccess(), "p2 end " + i);
+        }
+        assertEquals(p1, r1.getCurrentPlayer(), "p1 turn 3");
+        r1.setForcedDiceValue(3); // lands on index 13 (StreetProperty, unowned)
+        assertTrue(e1.rollDice("e-jail-1", p1.getId(), r1.getTurnId(), "jr-3").isSuccess(), "p1 jail roll 3");
+        assertEquals(PlayerStatus.ACTIVE, p1.getStatus(), "p1 auto-bailed on 3rd jail roll");
+        assertEquals(1450, p1.getMoney(), "p1 paid $50 auto-bail on 3rd jail roll");
+
+        // 2. Skipping 3 turns in Jail -> auto-bail ($50) on 3rd skip
+        GameRoom r2 = new GameRoom("e-jail-2", "Jail Skip Room", 2);
+        Player s1 = new Player("js1", "Skipper 1", 1500);
+        Player s2 = new Player("js2", "Other 2", 1500);
+        r2.addPlayer(s1);
+        r2.addPlayer(s2);
+        GameEngine e2 = new GameEngine(r2);
+        assertTrue(e2.startGame(), "Start r2");
+
+        s1.sendToJail(10);
+        for (int i = 1; i <= 2; i++) {
+            assertTrue(e2.endTurn("e-jail-2", s1.getId(), r2.getTurnId(), "skip-" + i).isSuccess(), "s1 skip " + i);
+            assertEquals(PlayerStatus.IN_JAIL, s1.getStatus(), "s1 stays IN_JAIL after skip " + i);
+            r2.setForcedDiceValue(3);
+            assertTrue(e2.rollDice("e-jail-2", s2.getId(), r2.getTurnId(), "s2r-" + i).isSuccess(), "s2 roll " + i);
+            assertTrue(e2.endTurn("e-jail-2", s2.getId(), r2.getTurnId(), "s2e-" + i).isSuccess(), "s2 end " + i);
+        }
+        assertTrue(e2.endTurn("e-jail-2", s1.getId(), r2.getTurnId(), "skip-3").isSuccess(), "s1 skip 3");
+        assertEquals(PlayerStatus.ACTIVE, s1.getStatus(), "s1 auto-bailed on 3rd skip");
+        assertEquals(1450, s1.getMoney(), "s1 paid $50 auto-bail on 3rd skip");
+
+        // 2b. Skipping 3 turns in Jail with < $50 -> BANKRUPT (s2 is current player after s1's 3rd skip)
+        s2.deductMoney(s2.getMoney() - 20);
+        s2.sendToJail(10);
+        for (int i = 1; i <= 2; i++) {
+            assertTrue(e2.endTurn("e-jail-2", s2.getId(), r2.getTurnId(), "s2skip-" + i).isSuccess(), "s2 skip " + i);
+            r2.setForcedDiceValue(3);
+            assertTrue(e2.rollDice("e-jail-2", s1.getId(), r2.getTurnId(), "s1r-" + i).isSuccess(), "s1 roll " + i);
+            assertTrue(e2.endTurn("e-jail-2", s1.getId(), r2.getTurnId(), "s1e-" + i).isSuccess(), "s1 end " + i);
+        }
+        assertTrue(e2.endTurn("e-jail-2", s2.getId(), r2.getTurnId(), "s2skip-3").isSuccess(), "s2 skip 3");
+        assertEquals(PlayerStatus.BANKRUPT, s2.getStatus(), "s2 bankrupt when unable to pay 3rd-turn auto-bail");
+        assertEquals(RoomStatus.FINISHED, r2.getStatus(), "r2 finished after s2 bankruptcy");
+
+        // 3. Bot in Jail escapes/advances without getting stuck
+        GameRoom r3 = new GameRoom("e-jail-3", "Bot Jail Room", 2);
+        Player b1 = new Player("jb1", "Bot Prisoner", 1500);
+        Player b2 = new Player("jb2", "Human Peer", 1500);
+        b1.setBot(true);
+        r3.addPlayer(b1);
+        r3.addPlayer(b2);
+        GameEngine e3 = new GameEngine(r3);
+        assertTrue(e3.startGame(), "Start r3");
+        b1.sendToJail(10);
+        int turnBeforeBot = r3.getTurnId();
+        BotController.processBotTurn(e3);
+        assertTrue(r3.getTurnId() > turnBeforeBot, "Bot in Jail advances turn instead of getting stuck");
+        assertEquals(b2, r3.getCurrentPlayer(), "Turn passes to b2 after bot jail turn");
+
+        // 4. payBail reclaims human control from TIMEOUT
+        GameRoom r4 = new GameRoom("e-jail-4", "Bail Timeout Room", 2);
+        Player h1 = new Player("jh1", "Timed Out Prisoner", 1500);
+        Player h2 = new Player("jh2", "Peer", 1500);
+        r4.addPlayer(h1);
+        r4.addPlayer(h2);
+        GameEngine e4 = new GameEngine(r4);
+        assertTrue(e4.startGame(), "Start r4");
+        h1.sendToJail(10);
+        int tid = r4.getTurnId();
+        assertTrue(e4.handleTimeout("e-jail-4", h1.getId(), tid, "to-jail").isSuccess(), "Timeout triggered");
+        assertTrue(e4.isBotTurnActive("e-jail-4", h1.getId(), tid), "Bot control active during TIMEOUT");
+        ActionResult bailRes = e4.payBail("e-jail-4", h1.getId(), tid, "bail-reclaim");
+        assertTrue(bailRes.isSuccess(), "payBail succeeds during TIMEOUT");
+        assertFalse(e4.isBotTurnActive("e-jail-4", h1.getId(), tid), "payBail reclaims human control from TIMEOUT");
+        assertEquals(PlayerStatus.ACTIVE, h1.getStatus(), "h1 is ACTIVE after payBail");
+        assertEquals(1450, h1.getMoney(), "h1 paid $50 bail");
+    }
+
+    private void testSuiteE_ConcurrentBotAndHumanNoDeadlock() throws Exception {
+        GameRoom room = new GameRoom("e-conc", "Concurrency Room", 2);
+        Player bot = new Player("c-bot", "Bot", 1500);
+        bot.setBot(true);
+        Player human = new Player("c-hum", "Human", 1500);
+        room.addPlayer(bot);
+        room.addPlayer(human);
+        GameEngine engine = new GameEngine(room);
+        assertTrue(engine.startGame(), "Start concurrency room");
+
+        List<Throwable> errors = new CopyOnWriteArrayList<>();
+        Thread botThread = new Thread(() -> {
+            try {
+                for (int i = 0; i < 120 && room.getStatus() == RoomStatus.PLAYING; i++) {
+                    BotController.processBotTurn(engine);
+                    Thread.yield();
+                }
+            } catch (Throwable t) {
+                errors.add(t);
+            }
+        }, "test-bot-thread");
+
+        Thread humanThread = new Thread(() -> {
+            try {
+                for (int i = 0; i < 120 && room.getStatus() == RoomStatus.PLAYING; i++) {
+                    int tid = room.getTurnId();
+                    engine.rollDice("e-conc", human.getId(), tid, "hr-" + i);
+                    engine.buyProperty("e-conc", human.getId(), tid, "hb-" + i);
+                    engine.endTurn("e-conc", human.getId(), tid, "he-" + i);
+                    // Concurrent snapshot-style reads on room/board
+                    room.getPlayers();
+                    room.getCurrentPlayer();
+                    room.getBoard().getTiles();
+                    Thread.yield();
+                }
+            } catch (Throwable t) {
+                errors.add(t);
+            }
+        }, "test-human-thread");
+
+        botThread.start();
+        humanThread.start();
+        botThread.join(5000);
+        humanThread.join(5000);
+
+        assertFalse(botThread.isAlive(), "Bot thread finished without deadlock");
+        assertFalse(humanThread.isAlive(), "Human thread finished without deadlock");
+        assertTrue(errors.isEmpty(), "No exceptions during concurrent Bot + human execution");
+    }
+
+    private void testSuiteE_StompUpgradeProperty() throws Exception {
+        try (GatewayHarness gw = startGateway("dev", null)) {
+            int port = gw.port;
+            AuthUser p1 = registerViaRest(port, "upgP1", "pass1234", "Upgrade Host");
+            AuthUser p2 = registerViaRest(port, "upgP2", "pass1234", "Upgrade Guest");
+            Map<String, String> h1 = Map.of("Authorization", "Bearer " + p1.token);
+            Map<String, String> h2 = Map.of("Authorization", "Bearer " + p2.token);
+
+            HttpResponse createRes = RawHttpClient.request("127.0.0.1", port, "POST", "/api/v1/rooms", h1,
+                    "{\"roomName\":\"Upgrade Arena\",\"maxPlayers\":2}");
+            assertEquals(201, createRes.statusCode, "Create room -> 201");
+            String roomId = (String) MiniJson.parseObject((String) MiniJson.parseObject(createRes.body).get("payload")).get("roomId");
+            assertEquals(200, RawHttpClient.request("127.0.0.1", port, "POST", "/api/v1/rooms/" + roomId + "/join", h2, "{}").statusCode,
+                    "p2 joins");
+
+            String topicDest = "/topic/room/" + roomId;
+            try (StompWsClient c1 = new StompWsClient("127.0.0.1", port, "/ws", null);
+                 StompWsClient c2 = new StompWsClient("127.0.0.1", port, "/ws", null)) {
+
+                assertEquals("CONNECTED", c1.connectAndExpectFrame("Bearer " + p1.token, 4000).command, "c1 CONNECTED");
+                assertEquals("CONNECTED", c2.connectAndExpectFrame("Bearer " + p2.token, 4000).command, "c2 CONNECTED");
+                c1.subscribe("sub-1", topicDest);
+                c2.subscribe("sub-2", topicDest);
+                awaitGameSnapshot(c1, topicDest, 4000);
+                awaitGameSnapshot(c2, topicDest, 4000);
+
+                assertEquals(200, RawHttpClient.request("127.0.0.1", port, "POST", "/api/v1/rooms/" + roomId + "/start", h1, "{}").statusCode,
+                        "Start -> 200");
+                awaitTopicMessageOfType(c1, topicDest, "GAME_STARTED", 4000);
+                Map<String, Object> snap = awaitGameSnapshot(c1, topicDest, 4000);
+
+                boolean upgraded = false;
+                for (int step = 0; step < 16 && !upgraded; step++) {
+                    String curId = (String) snap.get("currentPlayerId");
+                    int tid = ((Number) snap.get("turnId")).intValue();
+                    StompWsClient activeClient = p1.userId.equals(curId) ? c1 : c2;
+
+                    activeClient.send("/app/room/" + roomId + "/roll-dice", "{\"turnId\":" + tid + "}");
+                    snap = awaitGameSnapshot(c1, topicDest, 4000);
+                    if (!"AWAITING_DECISION".equals(snap.get("phase"))) {
+                        continue;
+                    }
+
+                    int pos = findPlayerPosition(snap, curId);
+                    Map<String, Object> tile = findTile(snap, pos);
+                    if ("STREET".equals(tile.get("type")) && tile.get("ownerId") == null) {
+                        activeClient.send("/app/room/" + roomId + "/buy-property",
+                                "{\"turnId\":" + tid + ",\"tileIndex\":" + pos + "}");
+                        awaitTopicMessageOfType(c1, topicDest, "PROPERTY_BOUGHT", 4000);
+                        snap = awaitGameSnapshot(c1, topicDest, 4000);
+
+                        activeClient.send("/app/room/" + roomId + "/upgrade-property",
+                                "{\"turnId\":" + tid + ",\"tileIndex\":" + pos + "}");
+                        Map<String, Object> upgMsg = awaitTopicMessageOfType(c1, topicDest, "PROPERTY_UPGRADED", 4000);
+                        Map<String, Object> upgPayload = MiniJson.parseObject((String) upgMsg.get("payload"));
+                        assertEquals(1, ((Number) upgPayload.get("houseCount")).intValue(), "PROPERTY_UPGRADED houseCount == 1");
+
+                        snap = awaitGameSnapshot(c1, topicDest, 4000);
+                        Map<String, Object> upgradedTile = findTile(snap, pos);
+                        assertEquals(1, ((Number) upgradedTile.get("houseCount")).intValue(),
+                                "Snapshot tile houseCount == 1 after upgrade");
+                        upgraded = true;
+                        break;
+                    }
+
+                    activeClient.send("/app/room/" + roomId + "/end-turn", "{\"turnId\":" + tid + "}");
+                    snap = awaitGameSnapshot(c1, topicDest, 4000);
+                }
+                assertTrue(upgraded, "Successfully landed on, bought, and upgraded a StreetProperty via STOMP");
+            }
+        }
+    }
+
+    private void testSuiteE_MidGameLeaveSurrenderAndFinish() throws Exception {
+        try (GatewayHarness gw = startGateway("dev", null)) {
+            int port = gw.port;
+            AuthUser p1 = registerViaRest(port, "lvP1", "pass1234", "Leave Host");
+            AuthUser p2 = registerViaRest(port, "lvP2", "pass1234", "Leave Guest");
+            Map<String, String> h1 = Map.of("Authorization", "Bearer " + p1.token);
+            Map<String, String> h2 = Map.of("Authorization", "Bearer " + p2.token);
+
+            HttpResponse createRes = RawHttpClient.request("127.0.0.1", port, "POST", "/api/v1/rooms", h1,
+                    "{\"roomName\":\"Surrender Arena\",\"maxPlayers\":2}");
+            assertEquals(201, createRes.statusCode, "Create room -> 201");
+            String roomId = (String) MiniJson.parseObject((String) MiniJson.parseObject(createRes.body).get("payload")).get("roomId");
+            assertEquals(200, RawHttpClient.request("127.0.0.1", port, "POST", "/api/v1/rooms/" + roomId + "/join", h2, "{}").statusCode,
+                    "p2 joins");
+
+            String topicDest = "/topic/room/" + roomId;
+            try (StompWsClient c1 = new StompWsClient("127.0.0.1", port, "/ws", null)) {
+                assertEquals("CONNECTED", c1.connectAndExpectFrame("Bearer " + p1.token, 4000).command, "c1 CONNECTED");
+                c1.subscribe("sub-1", topicDest);
+                awaitGameSnapshot(c1, topicDest, 4000);
+
+                assertEquals(200, RawHttpClient.request("127.0.0.1", port, "POST", "/api/v1/rooms/" + roomId + "/start", h1, "{}").statusCode,
+                        "Start -> 200");
+                awaitTopicMessageOfType(c1, topicDest, "GAME_STARTED", 4000);
+                Map<String, Object> snap = awaitGameSnapshot(c1, topicDest, 4000);
+
+                // Have p1 buy a property if possible before surrendering
+                Integer boughtTileIdx = null;
+                if (p1.userId.equals(snap.get("currentPlayerId"))) {
+                    int tid = ((Number) snap.get("turnId")).intValue();
+                    c1.send("/app/room/" + roomId + "/roll-dice", "{\"turnId\":" + tid + "}");
+                    snap = awaitGameSnapshot(c1, topicDest, 4000);
+                    if ("AWAITING_DECISION".equals(snap.get("phase"))) {
+                        int pos = findPlayerPosition(snap, p1.userId);
+                        Map<String, Object> tile = findTile(snap, pos);
+                        if (tile.get("ownerId") == null && tile.get("price") instanceof Number
+                                && ((Number) tile.get("price")).intValue() > 0) {
+                            c1.send("/app/room/" + roomId + "/buy-property",
+                                    "{\"turnId\":" + tid + ",\"tileIndex\":" + pos + "}");
+                            awaitTopicMessageOfType(c1, topicDest, "PROPERTY_BOUGHT", 4000);
+                            awaitGameSnapshot(c1, topicDest, 4000);
+                            boughtTileIdx = pos;
+                        }
+                    }
+                }
+
+                // Mid-game POST /leave by p1 surrenders p1 and finishes the 2-player match
+                HttpResponse leaveRes = RawHttpClient.request("127.0.0.1", port, "POST", "/api/v1/rooms/" + roomId + "/leave", h1, "{}");
+                assertEquals(200, leaveRes.statusCode, "Mid-game leave -> 200");
+
+                awaitTopicMessageOfType(c1, topicDest, "GAME_FINISHED", 4000);
+
+                HttpResponse finalSnapRes = RawHttpClient.request("127.0.0.1", port, "GET", "/api/v1/rooms/" + roomId + "/snapshot", h2, null);
+                assertEquals(200, finalSnapRes.statusCode, "Final snapshot -> 200");
+                Map<String, Object> finalSnap = MiniJson.parseObject((String) MiniJson.parseObject(finalSnapRes.body).get("payload"));
+                assertEquals("FINISHED", finalSnap.get("roomStatus"), "Room status is FINISHED after 2-player surrender");
+
+                if (boughtTileIdx != null) {
+                    Map<String, Object> clearedTile = findTile(finalSnap, boughtTileIdx);
+                    assertTrue(clearedTile.get("ownerId") == null, "Surrendered player's property ownership cleared");
+                }
+            }
+        }
+    }
+
+    private void testSuiteE_StompHeartbeatReconnectAuthAndProdJwt() throws Exception {
+        // 1. PROD GatewayConfig rejects missing or default JWT_SECRET
+        boolean threwMissingJwt = false;
+        try {
+            GatewayConfig.fromArgsAndEnv(new String[]{"--mode=prod", "--secret=prod-origin-secret"}, Map.of(), null);
+        } catch (IllegalArgumentException expected) {
+            threwMissingJwt = true;
+        }
+        assertTrue(threwMissingJwt, "PROD GatewayConfig rejects missing JWT_SECRET");
+
+        boolean threwDefaultJwt = false;
+        try {
+            GatewayConfig.fromArgsAndEnv(
+                    new String[]{"--mode=prod", "--secret=prod-origin-secret", "--jwt-secret=" + GatewayConfig.DEFAULT_JWT_SECRET},
+                    Map.of(),
+                    null);
+        } catch (IllegalArgumentException expected) {
+            threwDefaultJwt = true;
+        }
+        assertTrue(threwDefaultJwt, "PROD GatewayConfig rejects default JWT_SECRET");
+
+        GatewayConfig validProd = GatewayConfig.fromArgsAndEnv(
+                new String[]{"--mode=prod", "--secret=prod-origin-secret", "--jwt-secret=CustomProdJwtSecretKey2026Strong"},
+                Map.of(),
+                null);
+        assertEquals("prod", validProd.getMode(), "Valid PROD GatewayConfig accepted");
+
+        // 2. STOMP Heartbeat negotiation, non-member subscribe ERROR, and WS disconnect/reconnect snapshot recovery
+        try (GatewayHarness gw = startGateway("dev", null)) {
+            int port = gw.port;
+            AuthUser p1 = registerViaRest(port, "hbP1", "pass1234", "HB Host");
+            AuthUser p2 = registerViaRest(port, "hbP2", "pass1234", "HB Guest");
+            AuthUser p3 = registerViaRest(port, "hbP3", "pass1234", "HB Outsider");
+            Map<String, String> h1 = Map.of("Authorization", "Bearer " + p1.token);
+            Map<String, String> h2 = Map.of("Authorization", "Bearer " + p2.token);
+
+            HttpResponse createRes = RawHttpClient.request("127.0.0.1", port, "POST", "/api/v1/rooms", h1,
+                    "{\"roomName\":\"WS Resilience Arena\",\"maxPlayers\":2}");
+            assertEquals(201, createRes.statusCode, "Create room -> 201");
+            String roomId = (String) MiniJson.parseObject((String) MiniJson.parseObject(createRes.body).get("payload")).get("roomId");
+            assertEquals(200, RawHttpClient.request("127.0.0.1", port, "POST", "/api/v1/rooms/" + roomId + "/join", h2, "{}").statusCode,
+                    "p2 joins");
+            assertEquals(200, RawHttpClient.request("127.0.0.1", port, "POST", "/api/v1/rooms/" + roomId + "/start", h1, "{}").statusCode,
+                    "Start -> 200");
+
+            String topicDest = "/topic/room/" + roomId;
+
+            // Non-member subscribe rejected with STOMP ERROR
+            try (StompWsClient outsider = new StompWsClient("127.0.0.1", port, "/ws", null)) {
+                StompFrame conn = outsider.connectAndExpectFrame("Bearer " + p3.token, "10000,10000", 4000);
+                assertEquals("CONNECTED", conn.command, "Outsider CONNECTED");
+                String hb = conn.headers.get("heart-beat");
+                assertNotNull(hb, "CONNECTED includes heart-beat header");
+                assertFalse("0,0".equals(hb), "Negotiated heart-beat is non-zero for 10000,10000: " + hb);
+
+                outsider.subscribe("sub-outsider", topicDest);
+                StompFrame err = outsider.awaitAndConsume(f -> "ERROR".equals(f.command), 4000);
+                assertNotNull(err, "Non-member subscribe receives STOMP ERROR");
+                assertTrue(err.body != null && err.body.contains("FORBIDDEN_SUBSCRIPTION"),
+                        "STOMP ERROR body indicates FORBIDDEN_SUBSCRIPTION");
+            }
+
+            // Mid-game WS disconnect & reconnect with snapshot recovery
+            int initialTurnId;
+            try (StompWsClient c1 = new StompWsClient("127.0.0.1", port, "/ws", null)) {
+                StompFrame conn1 = c1.connectAndExpectFrame("Bearer " + p1.token, "10000,10000", 4000);
+                assertEquals("CONNECTED", conn1.command, "c1 CONNECTED");
+                c1.subscribe("sub-1", topicDest);
+                Map<String, Object> snap1 = awaitGameSnapshot(c1, topicDest, 4000);
+                initialTurnId = ((Number) snap1.get("turnId")).intValue();
+            } // c1 disconnects here
+
+            try (StompWsClient c1Reconnect = new StompWsClient("127.0.0.1", port, "/ws", null)) {
+                StompFrame conn2 = c1Reconnect.connectAndExpectFrame("Bearer " + p1.token, "10000,10000", 4000);
+                assertEquals("CONNECTED", conn2.command, "c1Reconnect CONNECTED");
+                c1Reconnect.subscribe("sub-rec", topicDest);
+                Map<String, Object> recoveredSnap = awaitGameSnapshot(c1Reconnect, topicDest, 4000);
+                assertEquals(roomId, recoveredSnap.get("roomId"), "Reconnected snapshot roomId matches");
+                assertEquals(initialTurnId, ((Number) recoveredSnap.get("turnId")).intValue(),
+                        "Reconnected snapshot turnId matches");
+                assertEquals("PLAYING", recoveredSnap.get("roomStatus"), "Reconnected snapshot status is PLAYING");
+            }
+        }
+    }
+
+    private void testSuiteE_TimeoutInAwaitingDecisionAndEnsureBotResolved() throws Exception {
+        // 1. Engine-level: timeout in AWAITING_DECISION (unowned property & doubles) + ensureBotTurnResolved
+        GameRoom room = new GameRoom("e-to-dec", "Timeout Decision Room", 2);
+        Player p1 = new Player("td1", "Human 1", 1500);
+        Player p2 = new Player("td2", "Human 2", 1500);
+        room.addPlayer(p1);
+        room.addPlayer(p2);
+        GameEngine engine = new GameEngine(room);
+        assertTrue(engine.startGame(), "Start timeout-decision room");
+
+        // Land on unowned property (index 3) -> AWAITING_DECISION
+        room.setForcedDiceValue(3);
+        int turn1 = room.getTurnId();
+        assertTrue(engine.rollDice("e-to-dec", p1.getId(), turn1, "td-r1").isSuccess(), "Roll into AWAITING_DECISION");
+        assertEquals("AWAITING_DECISION", engine.getEffectivePhase().name(),
+                "Effective phase is AWAITING_DECISION");
+
+        // Timeout while in AWAITING_DECISION
+        assertTrue(engine.handleTimeout("e-to-dec", p1.getId(), turn1, "td-to1").isSuccess(),
+                "Timeout succeeds in AWAITING_DECISION");
+        assertEquals("TIMEOUT", engine.getCurrentPhase().name(), "Current phase is TIMEOUT");
+        assertTrue(engine.isBotControlActive(), "Bot control active after timeout");
+        assertEquals("AWAITING_DECISION", engine.getEffectivePhase().name(),
+                "getEffectivePhase() preserves AWAITING_DECISION (never TIMEOUT)");
+
+        BotController.processBotTurn(engine);
+        assertEquals(p2, room.getCurrentPlayer(), "Bot completes decision and advances turn to p2");
+        assertFalse(engine.isBotControlActive(), "Bot control cleared after turn advance");
+
+        // Trigger timeout on p2 and verify ensureBotTurnResolved recovers stuck turn
+        int turn2 = room.getTurnId();
+        assertTrue(engine.handleTimeout("e-to-dec", p2.getId(), turn2, "td-to2").isSuccess(), "Timeout on p2");
+        assertTrue(engine.ensureBotTurnResolved("e-to-dec", turn2), "ensureBotTurnResolved recovers stuck turn");
+        assertEquals(p1, room.getCurrentPlayer(), "Turn recovered back to p1");
+        assertFalse(engine.isBotControlActive(), "Bot control cleared after ensureBotTurnResolved");
+
+        // 2. Live Gateway + STOMP: timeout during AWAITING_DECISION reports valid actionPhase (never TIMEOUT)
+        try (GatewayHarness gw = startGatewayWithTurnTimeout("dev", null, 1)) {
+            int port = gw.port;
+            AuthUser u1 = registerViaRest(port, "tdWs1", "pass1234", "TD Host");
+            AuthUser u2 = registerViaRest(port, "tdWs2", "pass1234", "TD Guest");
+            Map<String, String> h1 = Map.of("Authorization", "Bearer " + u1.token);
+            Map<String, String> h2 = Map.of("Authorization", "Bearer " + u2.token);
+
+            HttpResponse createRes = RawHttpClient.request("127.0.0.1", port, "POST", "/api/v1/rooms", h1,
+                    "{\"roomName\":\"TD WS Arena\",\"maxPlayers\":2}");
+            assertEquals(201, createRes.statusCode, "Create room -> 201");
+            String roomId = (String) MiniJson.parseObject((String) MiniJson.parseObject(createRes.body).get("payload")).get("roomId");
+            assertEquals(200, RawHttpClient.request("127.0.0.1", port, "POST", "/api/v1/rooms/" + roomId + "/join", h2, "{}").statusCode,
+                    "u2 joins");
+
+            String topicDest = "/topic/room/" + roomId;
+            try (StompWsClient c1 = new StompWsClient("127.0.0.1", port, "/ws", null)) {
+                assertEquals("CONNECTED", c1.connectAndExpectFrame("Bearer " + u1.token, 4000).command, "c1 CONNECTED");
+                c1.subscribe("sub-1", topicDest);
+                awaitGameSnapshot(c1, topicDest, 4000);
+
+                assertEquals(200, RawHttpClient.request("127.0.0.1", port, "POST", "/api/v1/rooms/" + roomId + "/start", h1, "{}").statusCode,
+                        "Start -> 200");
+                awaitTopicMessageOfType(c1, topicDest, "GAME_STARTED", 4000);
+                Map<String, Object> snap = awaitGameSnapshot(c1, topicDest, 4000);
+
+                // Roll until we reach AWAITING_DECISION (or timeout triggers on AWAITING_ROLL and advances)
+                boolean testedDecisionTimeout = false;
+                for (int i = 0; i < 6 && !testedDecisionTimeout; i++) {
+                    String curId = (String) snap.get("currentPlayerId");
+                    int tid = ((Number) snap.get("turnId")).intValue();
+                    if (u1.userId.equals(curId)) {
+                        c1.send("/app/room/" + roomId + "/roll-dice", "{\"turnId\":" + tid + "}");
+                        snap = awaitGameSnapshot(c1, topicDest, 4000);
+                    }
+                    if ("AWAITING_DECISION".equals(snap.get("actionPhase"))) {
+                        int decisionTid = ((Number) snap.get("turnId")).intValue();
+                        // Let 1s timer expire in AWAITING_DECISION
+                        Map<String, Object> toMsg = awaitTopicMessageOfType(c1, topicDest, "TURN_TIMED_OUT", 5000);
+                        Map<String, Object> toPayload = MiniJson.parseObject((String) toMsg.get("payload"));
+                        assertNotNull(toPayload.get("actionPhase"), "TURN_TIMED_OUT includes actionPhase");
+                        assertFalse("TIMEOUT".equals(toPayload.get("actionPhase")),
+                                "TURN_TIMED_OUT actionPhase is never TIMEOUT");
+
+                        Map<String, Object> tcMsg = awaitTopicMessageOfType(c1, topicDest, "TURN_CHANGED", 5000);
+                        Map<String, Object> tcPayload = MiniJson.parseObject((String) tcMsg.get("payload"));
+                        assertTrue(((Number) tcPayload.get("newTurnId")).intValue() > decisionTid,
+                                "Bot advances turn after AWAITING_DECISION timeout");
+                        assertFalse("TIMEOUT".equals(tcPayload.get("phase")),
+                                "TURN_CHANGED phase is never TIMEOUT");
+
+                        Map<String, Object> postSnap = awaitTopicMessageOfType(c1, topicDest, "GAME_STATE_SNAPSHOT", 5000);
+                        Map<String, Object> postPayload = MiniJson.parseObject((String) postSnap.get("payload"));
+                        assertFalse("TIMEOUT".equals(postPayload.get("actionPhase")),
+                                "Snapshot actionPhase is never TIMEOUT");
+                        testedDecisionTimeout = true;
+                        break;
+                    } else {
+                        // Wait for turn to advance
+                        awaitTopicMessageOfType(c1, topicDest, "TURN_CHANGED", 5000);
+                        snap = awaitGameSnapshot(c1, topicDest, 5000);
+                    }
+                }
+                assertTrue(testedDecisionTimeout, "Verified live STOMP timeout during AWAITING_DECISION");
+            }
+        }
+    }
+
+    private void testSuiteE_DedicatedBotAutoPlaysWithoutWaiting30s() throws Exception {
+        GameRoom room = new GameRoom("e-ded-bot", "Dedicated Bot Room", 2);
+        Player human = new Player("db-hum", "Human", 1500);
+        Player bot = new Player("db-bot", "AI Bot", 1500);
+        bot.setBot(true);
+        room.addPlayer(human);
+        room.addPlayer(bot);
+
+        GameEngine engine = new GameEngine(room);
+        assertTrue(engine.startGame(), "Start dedicated bot room");
+
+        List<String> eventTypes = new CopyOnWriteArrayList<>();
+        CountDownLatch botTurnDone = new CountDownLatch(1);
+        engine.addEventListener(evt -> {
+            eventTypes.add(evt.getType().name());
+            if (evt.getType() == EngineEvent.Type.TURN_ENDED && bot.getId().equals(evt.getPlayerId())) {
+                botTurnDone.countDown();
+            }
+        });
+
+        ScheduledExecutorService scheduler = Executors.newSingleThreadScheduledExecutor(r -> {
+            Thread t = new Thread(r, "test-dedicated-bot-timer");
+            t.setDaemon(true);
+            return t;
+        });
+        try {
+            TurnTimerService timerService = new TurnTimerService(scheduler, 30);
+
+            // Human plays turn 1 and ends turn -> now it is bot's turn
+            int t1 = room.getTurnId();
+            room.setForcedDiceValue(3);
+            assertTrue(engine.rollDice("e-ded-bot", human.getId(), t1, "h-r1").isSuccess(), "Human rolls");
+            assertTrue(engine.endTurn("e-ded-bot", human.getId(), t1, "h-e1").isSuccess(), "Human ends turn");
+            assertEquals(bot, room.getCurrentPlayer(), "Now bot's turn");
+
+            long startMs = System.currentTimeMillis();
+            timerService.startTurnTimer("e-ded-bot", room.getTurnId(), engine);
+            boolean completed = botTurnDone.await(5, TimeUnit.SECONDS);
+            long elapsedMs = System.currentTimeMillis() - startMs;
+
+            assertTrue(completed, "Dedicated bot auto-played without waiting 30s (elapsed=" + elapsedMs + "ms)");
+            assertTrue(elapsedMs < 5000, "Dedicated bot completed in < 5s despite 30s timeout");
+            assertFalse(eventTypes.contains("TURN_TIMED_OUT"), "Dedicated bot did not trigger TURN_TIMED_OUT");
+            assertFalse(eventTypes.contains("BOT_TAKEOVER"), "Dedicated bot did not trigger BOT_TAKEOVER");
+            assertEquals(human, room.getCurrentPlayer(), "Turn returned to human after dedicated bot turn");
+        } finally {
+            scheduler.shutdownNow();
+        }
+    }
+
+    @SuppressWarnings("unchecked")
+    private static int findPlayerPosition(Map<String, Object> snapshot, String playerId) {
+        List<Object> players = (List<Object>) snapshot.get("players");
+        for (Object obj : players) {
+            Map<String, Object> p = (Map<String, Object>) obj;
+            if (playerId.equals(p.get("id"))) {
+                return ((Number) p.get("position")).intValue();
+            }
+        }
+        throw new AssertionError("Player not found in snapshot: " + playerId);
+    }
+
+    @SuppressWarnings("unchecked")
+    private static Map<String, Object> findTile(Map<String, Object> snapshot, int index) {
+        List<Object> tiles = (List<Object>) snapshot.get("tiles");
+        for (Object obj : tiles) {
+            Map<String, Object> t = (Map<String, Object>) obj;
+            if (((Number) t.get("index")).intValue() == index) {
+                return t;
+            }
+        }
+        throw new AssertionError("Tile not found in snapshot: " + index);
+    }
+
+    // =========================================================================
     // SERVER HARNESS & TEST HELPERS
     // =========================================================================
 
@@ -1330,16 +1966,22 @@ public class FullSystemTestRunner {
 
     private static final class GatewayHarness implements AutoCloseable {
         final int port;
-        private final AutoCloseable closer;
+        private final ThrowingRunnable closer;
 
-        GatewayHarness(int port, AutoCloseable closer) {
+        GatewayHarness(int port, ThrowingRunnable closer) {
             this.port = port;
             this.closer = closer;
         }
 
         @Override
-        public void close() throws Exception {
-            closer.close();
+        public void close() {
+            try {
+                closer.run();
+            } catch (RuntimeException e) {
+                throw e;
+            } catch (Exception e) {
+                throw new RuntimeException("Failed to close GatewayHarness", e);
+            }
         }
     }
 
@@ -1758,11 +2400,15 @@ public class FullSystemTestRunner {
         }
 
         StompFrame connectAndExpectFrame(String authorizationHeader, long timeoutMs) throws Exception {
+            return connectAndExpectFrame(authorizationHeader, "0,0", timeoutMs);
+        }
+
+        StompFrame connectAndExpectFrame(String authorizationHeader, String heartBeatHeader, long timeoutMs) throws Exception {
             StringBuilder frame = new StringBuilder();
             frame.append("CONNECT\n");
             frame.append("accept-version:1.2,1.1,1.0\n");
             frame.append("host:localhost\n");
-            frame.append("heart-beat:0,0\n");
+            frame.append("heart-beat:").append(heartBeatHeader == null ? "0,0" : heartBeatHeader).append('\n');
             if (authorizationHeader != null) {
                 frame.append("Authorization:").append(authorizationHeader).append('\n');
             }

@@ -1,10 +1,14 @@
 package server.security;
 
+import server.gateway.SimpleJson;
+
 import javax.crypto.Mac;
 import javax.crypto.spec.SecretKeySpec;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.util.Base64;
+import java.util.LinkedHashMap;
+import java.util.Map;
 
 /**
  * Tiện ích xử lý JSON Web Token (JWT) chuẩn HS256 cho REST API và WebSocket handshake.
@@ -35,15 +39,18 @@ public class JwtTokenProvider {
             throw new IllegalArgumentException("userId và username không được để trống.");
         }
 
-        String rawToken = stripBearer(userId);
+        String rawUserId = stripBearer(userId);
         long now = System.currentTimeMillis();
         long exp = now + validityInMilliseconds;
 
         String headerEncoded = base64UrlEncode(HEADER_JSON.getBytes(StandardCharsets.UTF_8));
-        String payloadJson = String.format(
-                "{\"sub\":\"%s\",\"userId\":\"%s\",\"username\":\"%s\",\"iat\":%d,\"exp\":%d}",
-                escapeJson(rawToken), escapeJson(rawToken), escapeJson(username), now / 1000, exp / 1000
-        );
+        Map<String, Object> claims = new LinkedHashMap<>();
+        claims.put("sub", rawUserId);
+        claims.put("userId", rawUserId);
+        claims.put("username", username);
+        claims.put("iat", now / 1000);
+        claims.put("exp", exp / 1000);
+        String payloadJson = SimpleJson.stringify(claims);
         String payloadEncoded = base64UrlEncode(payloadJson.getBytes(StandardCharsets.UTF_8));
 
         String signingInput = headerEncoded + "." + payloadEncoded;
@@ -77,7 +84,9 @@ public class JwtTokenProvider {
             }
 
             String payloadJson = new String(base64UrlDecode(parts[1]), StandardCharsets.UTF_8);
-            long expSeconds = extractLongClaim(payloadJson, "exp");
+            Map<String, Object> claims = SimpleJson.parseObject(payloadJson);
+            Object expObj = claims.get("exp");
+            long expSeconds = (expObj instanceof Number n) ? n.longValue() : -1L;
             long nowSeconds = System.currentTimeMillis() / 1000;
 
             return expSeconds > nowSeconds;
@@ -96,8 +105,9 @@ public class JwtTokenProvider {
         try {
             String[] parts = stripBearer(token).split("\\.");
             String payloadJson = new String(base64UrlDecode(parts[1]), StandardCharsets.UTF_8);
-            String userId = extractStringClaim(payloadJson, "userId");
-            return (userId != null) ? userId : extractStringClaim(payloadJson, "sub");
+            Map<String, Object> claims = SimpleJson.parseObject(payloadJson);
+            String userId = SimpleJson.getString(claims, "userId");
+            return (userId != null) ? userId : SimpleJson.getString(claims, "sub");
         } catch (Exception e) {
             return null;
         }
@@ -110,7 +120,8 @@ public class JwtTokenProvider {
         try {
             String[] parts = stripBearer(token).split("\\.");
             String payloadJson = new String(base64UrlDecode(parts[1]), StandardCharsets.UTF_8);
-            return extractStringClaim(payloadJson, "username");
+            Map<String, Object> claims = SimpleJson.parseObject(payloadJson);
+            return SimpleJson.getString(claims, "username");
         } catch (Exception e) {
             return null;
         }
@@ -143,31 +154,5 @@ public class JwtTokenProvider {
 
     private static byte[] base64UrlDecode(String str) {
         return Base64.getUrlDecoder().decode(str);
-    }
-
-    private static String escapeJson(String value) {
-        return value.replace("\\", "\\\\").replace("\"", "\\\"");
-    }
-
-    private static String extractStringClaim(String json, String key) {
-        String pattern = "\"" + key + "\":\"";
-        int start = json.indexOf(pattern);
-        if (start == -1) return null;
-        start += pattern.length();
-        int end = json.indexOf("\"", start);
-        if (end == -1) return null;
-        return json.substring(start, end);
-    }
-
-    private static long extractLongClaim(String json, String key) {
-        String pattern = "\"" + key + "\":";
-        int start = json.indexOf(pattern);
-        if (start == -1) return -1L;
-        start += pattern.length();
-        int end = start;
-        while (end < json.length() && (Character.isDigit(json.charAt(end)) || json.charAt(end) == '-')) {
-            end++;
-        }
-        return Long.parseLong(json.substring(start, end));
     }
 }

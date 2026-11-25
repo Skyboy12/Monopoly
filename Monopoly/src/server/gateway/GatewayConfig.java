@@ -19,7 +19,7 @@ public class GatewayConfig {
     public static final int DEFAULT_PORT = 8080;
     public static final String DEFAULT_MODE = "dev";
     public static final String DEFAULT_JWT_SECRET = "MonopolyJwtSecretKey2026PtitOopProject";
-    public static final long DEFAULT_JWT_VALIDITY_MS = 3600_000L;
+    public static final long DEFAULT_JWT_VALIDITY_MS = 86_400_000L;
 
     private final int port;
     private final String mode;
@@ -82,6 +82,8 @@ public class GatewayConfig {
                 DEFAULT_MODE
         );
 
+        String normalizedMode = normalizeMode(rawMode);
+
         String originSecret = firstNonBlank(
                 cli.get("secret"),
                 env.get("ORIGIN_SECRET_KEY"),
@@ -90,14 +92,41 @@ public class GatewayConfig {
                 dotEnv.get("APP_SECURITY_ORIGIN_SECRET")
         );
 
-        String jwtSecret = firstNonBlank(
+        String configuredJwtSecret = firstNonBlank(
                 cli.get("jwt-secret"),
                 env.get("JWT_SECRET"),
-                dotEnv.get("JWT_SECRET"),
-                DEFAULT_JWT_SECRET
+                dotEnv.get("JWT_SECRET")
         );
 
-        return new GatewayConfig(port, rawMode, originSecret, jwtSecret, DEFAULT_JWT_VALIDITY_MS);
+        if ("prod".equals(normalizedMode)) {
+            if (originSecret == null || originSecret.isBlank()) {
+                throw new IllegalArgumentException("ORIGIN_SECRET_KEY bắt buộc phải được cấu hình trong chế độ prod.");
+            }
+            if (configuredJwtSecret == null || configuredJwtSecret.isBlank()
+                    || DEFAULT_JWT_SECRET.equals(configuredJwtSecret.trim())) {
+                throw new IllegalArgumentException("JWT_SECRET bắt buộc phải được cấu hình (khác mặc định) trong chế độ prod.");
+            }
+        }
+
+        String jwtSecret = (configuredJwtSecret != null && !configuredJwtSecret.isBlank())
+                ? configuredJwtSecret
+                : DEFAULT_JWT_SECRET;
+
+        String rawJwtValidity = firstNonBlank(
+                cli.get("jwt-validity-ms"),
+                env.get("JWT_VALIDITY_MS"),
+                dotEnv.get("JWT_VALIDITY_MS")
+        );
+        long jwtValidityMs = DEFAULT_JWT_VALIDITY_MS;
+        if (rawJwtValidity != null) {
+            try {
+                jwtValidityMs = Long.parseLong(rawJwtValidity.trim());
+            } catch (NumberFormatException e) {
+                throw new IllegalArgumentException("Giá trị JWT_VALIDITY_MS không hợp lệ: " + rawJwtValidity, e);
+            }
+        }
+
+        return new GatewayConfig(port, normalizedMode, originSecret, jwtSecret, jwtValidityMs);
     }
 
     public CloudflareOriginFilter createOriginFilter() {

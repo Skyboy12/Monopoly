@@ -5,7 +5,14 @@ import model.GameRoom;
 import model.Player;
 import model.PlayerStatus;
 import model.RoomStatus;
+import model.event.GameEvent;
+import model.event.GameEventManager;
+import model.item.Item;
+import model.item.ItemFactory;
+import model.item.ItemTargetContext;
+import model.item.ItemTriggerPhase;
 import model.tile.PropertyTile;
+import model.tile.StreetProperty;
 import model.tile.Tile;
 
 import java.time.Instant;
@@ -29,6 +36,7 @@ public class GameEngine {
     private TurnPhase currentPhase;
 
     private int consecutiveDoubles;
+    private boolean swappedPositionThisTurn = false;
 
     // Thông tin khi Bot tiếp quản do timeout.
     private boolean botControlActive;
@@ -65,6 +73,35 @@ public class GameEngine {
             }
 
             return currentPhase;
+        }
+    }
+
+    public synchronized TurnPhase getEffectivePhase() {
+        synchronized (room) {
+            if (room.getStatus() == RoomStatus.FINISHED) {
+                return TurnPhase.FINISHED;
+            }
+            return getActionPhase();
+        }
+    }
+
+    public synchronized boolean isBotControlActive() {
+        synchronized (room) {
+            return botControlActive;
+        }
+    }
+
+    public synchronized boolean ensureBotTurnResolved(String roomId, int expectedTurnId) {
+        synchronized (room) {
+            if (validRoom(roomId)
+                    && room.getStatus() == RoomStatus.PLAYING
+                    && room.getTurnId() == expectedTurnId
+                    && (botControlActive
+                    || (room.getCurrentPlayer() != null && room.getCurrentPlayer().isBot()))) {
+                advanceTurn(room.getCurrentPlayer(), expectedTurnId);
+                return true;
+            }
+            return false;
         }
     }
 
@@ -184,6 +221,7 @@ public class GameEngine {
 
             currentPhase = TurnPhase.AWAITING_ROLL;
             consecutiveDoubles = 0;
+            swappedPositionThisTurn = false;
             clearBotControl();
 
             emit(
@@ -273,10 +311,11 @@ public class GameEngine {
                         playerId, turnId));
             }
 
-            if (player.getStatus() != PlayerStatus.ACTIVE) {
+            if (player.getStatus() != PlayerStatus.ACTIVE
+                    && player.getStatus() != PlayerStatus.IN_JAIL) {
                 return save(result(false, "ROLL_DICE", actionId,
                         "PLAYER_NOT_ACTIVE",
-                        "Người chơi không ở trạng thái ACTIVE.",
+                        "Người chơi không thể tung xúc xắc ở trạng thái hiện tại.",
                         playerId, turnId));
             }
 
@@ -299,6 +338,8 @@ public class GameEngine {
             int turnId,
             String actionId) {
 
+        boolean wasInJail = player.getStatus() == PlayerStatus.IN_JAIL;
+
         Dice dice = new Dice();
         Integer forcedDice = room.getForcedDiceValue();
         if (forcedDice != null && forcedDice >= 2 && forcedDice <= 12) {
@@ -310,10 +351,13 @@ public class GameEngine {
 
         room.setLastDice(dice);
 
-        if (dice.isDouble()) {
-            consecutiveDoubles++;
+        int predictedNewPos;
+        if (wasInJail) {
+            boolean willEscape = dice.isDouble() || player.getTurnsInJail() >= 2;
+            predictedNewPos = willEscape ? ((player.getPosition() + dice.getTotal()) % 40) : player.getPosition();
         } else {
-            consecutiveDoubles = 0;
+            boolean threeDoubles = (consecutiveDoubles + (dice.isDouble() ? 1 : 0)) >= 3;
+            predictedNewPos = threeDoubles ? 10 : ((player.getPosition() + dice.getTotal()) % 40);
         }
 
         emit(
@@ -323,35 +367,75 @@ public class GameEngine {
                 Map.of(
                         "dice1", String.valueOf(dice.getDice1()),
                         "dice2", String.valueOf(dice.getDice2()),
-                        "total", String.valueOf(dice.getTotal())
+                        "total", String.valueOf(dice.getTotal()),
+                        "newPosition", String.valueOf(predictedNewPos)
                 )
         );
 
-        // Gieo đôi ba lần liên tiếp thì vào tù.
-        if (consecutiveDoubles >= 3) {
-
-            player.sendToJail(10);
+        if (wasInJail) {
             consecutiveDoubles = 0;
+            if (dice.isDouble()) {
+                player.setStatus(PlayerStatus.ACTIVE);
+                player.setTurnsInJail(0);
+            } else {
+                Tile jailTile = room.getBoard().getTile(10);
+                if (jailTile != null) {
+                    jailTile.onLand(player, room);
+                }
+                if (player.getStatus() != PlayerStatus.ACTIVE) {
+                    if (checkGameFinished()) {
+                        return result(true, "ROLL_DICE", actionId,
+                                "GAME_FINISHED", "Ván chơi đã kết thúc.",
+                                playerId, turnId);
+                    }
+                    boolean bankrupt = player.getStatus() == PlayerStatus.BANKRUPT;
+                    advanceTurn(player, turnId);
+                    return result(true, "ROLL_DICE", actionId,
+                            bankrupt ? "BANKRUPT" : "JAIL_STAY",
+                            bankrupt ? "Người chơi đã phá sản." : "Không tung được đôi, tiếp tục ở tù.",
+                            playerId, turnId);
+                }
+            }
+        } else {
+            if (dice.isDouble()) {
+                consecutiveDoubles++;
+            } else {
+                consecutiveDoubles = 0;
+            }
 
-            emit(
-                    EngineEvent.Type.PLAYER_SENT_TO_JAIL,
-                    player,
-                    turnId,
-                    Collections.emptyMap()
-            );
+            // Gieo đôi ba lần liên tiếp thì vào tù.
+            if (consecutiveDoubles >= 3) {
 
-            advanceTurn(player, turnId);
+                player.sendToJail(10);
+                consecutiveDoubles = 0;
 
-            return result(true, "ROLL_DICE", actionId,
-                    "THREE_DOUBLES",
-                    "Gieo đôi ba lần, người chơi vào tù.",
-                    playerId, turnId);
+                emit(
+                        EngineEvent.Type.PLAYER_SENT_TO_JAIL,
+                        player,
+                        turnId,
+                        Collections.emptyMap()
+                );
+
+                advanceTurn(player, turnId);
+
+                return result(true, "ROLL_DICE", actionId,
+                        "THREE_DOUBLES",
+                        "Gieo đôi ba lần, người chơi vào tù.",
+                        playerId, turnId);
+            }
         }
 
-        currentPhase = TurnPhase.RESOLVING_ACTION;
+        setActionPhase(TurnPhase.RESOLVING_ACTION);
 
+        int oldPosition = player.getPosition();
         // Player.move() tự cộng $200 khi đi qua GO.
         player.move(dice.getTotal());
+
+        if (oldPosition + dice.getTotal() >= 40
+                && player.getStatus() == PlayerStatus.ACTIVE
+                && player.getInventory() != null) {
+            player.getInventory().addItem(ItemFactory.createRandomItem());
+        }
 
         // Gọi trực tiếp phương thức đa hình.
         Tile tile = room.getBoard().getTile(player.getPosition());
@@ -360,13 +444,20 @@ public class GameEngine {
             try {
                 tile.onLand(player, room);
 
-                if (tile.isFrozen()) {
+                int hops = 0;
+                while (tile.isFrozen() && hops < 5 && player.getStatus() == PlayerStatus.ACTIVE) {
+                    hops++;
                     player.move(2);
                     Tile slidTile = room.getBoard().getTile(player.getPosition());
-                    if (slidTile != null) {
-                        slidTile.onLand(player, room);
-                        tile = slidTile;
+                    if (slidTile == null) {
+                        break;
                     }
+                    slidTile.onLand(player, room);
+                    tile = slidTile;
+                }
+
+                if (player.getStatus() == PlayerStatus.IN_JAIL) {
+                    consecutiveDoubles = 0;
                 }
 
                 emit(
@@ -384,7 +475,7 @@ public class GameEngine {
             } catch (RuntimeException e) {
 
                 // Không gieo lại xúc xắc vì người chơi đã di chuyển.
-                currentPhase = TurnPhase.AWAITING_DECISION;
+                setActionPhase(TurnPhase.AWAITING_DECISION);
 
                 return result(false, "ROLL_DICE", actionId,
                         "TILE_ACTION_ERROR",
@@ -408,7 +499,7 @@ public class GameEngine {
                     playerId, turnId);
         }
 
-        currentPhase = TurnPhase.AWAITING_DECISION;
+        setActionPhase(TurnPhase.AWAITING_DECISION);
 
         return result(true, "ROLL_DICE", actionId,
                 "OK", "Đã gieo xúc xắc và xử lý ô cờ.",
@@ -525,6 +616,13 @@ public class GameEngine {
                     player.getId(), room.getTurnId());
         }
 
+        if (swappedPositionThisTurn) {
+            return result(false, "BUY_PROPERTY", null,
+                    "CANNOT_BUY_AFTER_SWAP",
+                    "Không thể mua đất sau khi hoán đổi vị trí trong lượt này.",
+                    player.getId(), room.getTurnId());
+        }
+
         Tile tile = room.getBoard().getTile(player.getPosition());
 
         if (!(tile instanceof PropertyTile)) {
@@ -551,6 +649,362 @@ public class GameEngine {
         }
 
         return null;
+    }
+
+    // ================= PAY BAIL =================
+
+    public synchronized boolean payBail(String playerId, int turnId) {
+        return payBailInternal(
+                room.getId(), playerId, turnId, newId(), false
+        ).isSuccess();
+    }
+
+    public synchronized ActionResult payBail(
+            String roomId, String playerId, int turnId, String actionId) {
+        return payBailInternal(
+                roomId, playerId, turnId, actionId, true
+        );
+    }
+
+    private ActionResult payBailInternal(
+            String roomId,
+            String playerId,
+            int turnId,
+            String actionId,
+            boolean humanAction) {
+
+        synchronized (room) {
+            ActionResult old = findDuplicate(
+                    "PAY_BAIL", roomId, playerId, turnId, actionId
+            );
+            if (old != null) {
+                return old;
+            }
+
+            ActionResult invalid = validateBase(
+                    roomId, playerId, turnId, "PAY_BAIL", actionId
+            );
+            if (invalid != null) {
+                return save(invalid);
+            }
+
+            Player player = room.getCurrentPlayer();
+            if (humanAction && player.isBot()) {
+                return save(result(false, "PAY_BAIL", actionId,
+                        "BOT_CONTROLLED", "Lượt này do Bot điều khiển.",
+                        playerId, turnId));
+            }
+
+            if (getActionPhase() != TurnPhase.AWAITING_ROLL) {
+                return save(result(false, "PAY_BAIL", actionId,
+                        "INVALID_PHASE", "Chỉ có thể nộp tiền bảo lãnh trước khi gieo xúc xắc.",
+                        playerId, turnId));
+            }
+
+            if (player.getStatus() != PlayerStatus.IN_JAIL) {
+                return save(result(false, "PAY_BAIL", actionId,
+                        "PLAYER_NOT_IN_JAIL", "Người chơi không ở trong tù.",
+                        playerId, turnId));
+            }
+
+            if (humanAction) {
+                reclaimHumanControl(player, turnId);
+            }
+
+            if (!player.payBail()) {
+                return save(result(false, "PAY_BAIL", actionId,
+                        "NOT_ENOUGH_MONEY", "Không đủ $50 để nộp tiền bảo lãnh.",
+                        playerId, turnId));
+            }
+
+            emit(
+                    EngineEvent.Type.BAIL_PAID,
+                    player,
+                    turnId,
+                    Map.of("amount", "50")
+            );
+
+            return save(result(true, "PAY_BAIL", actionId,
+                    "OK", "Đã nộp tiền bảo lãnh ra tù.",
+                    playerId, turnId));
+        }
+    }
+
+    // ================= USE ITEM =================
+
+    public synchronized ActionResult useItem(
+            String roomId,
+            String playerId,
+            int turnId,
+            String itemId,
+            ItemTargetContext context,
+            String actionId) {
+
+        synchronized (room) {
+            ActionResult old = findDuplicate(
+                    "USE_ITEM", roomId, playerId, turnId, actionId
+            );
+            if (old != null) {
+                return old;
+            }
+
+            ActionResult invalid = validateBase(
+                    roomId, playerId, turnId, "USE_ITEM", actionId
+            );
+            if (invalid != null) {
+                return save(invalid);
+            }
+
+            Player player = room.getCurrentPlayer();
+            if (player.isBot()) {
+                return save(result(false, "USE_ITEM", actionId,
+                        "BOT_CONTROLLED", "Lượt này do Bot điều khiển.",
+                        playerId, turnId));
+            }
+
+            reclaimHumanControl(player, turnId);
+
+            if (itemId == null || itemId.isBlank()
+                    || player.getInventory() == null
+                    || !player.getInventory().hasItem(itemId)) {
+                return save(result(false, "USE_ITEM", actionId,
+                        "ITEM_NOT_FOUND", "Không tìm thấy vật phẩm trong túi đồ.",
+                        playerId, turnId));
+            }
+
+            Item item = player.getInventory().getItemById(itemId);
+            TurnPhase phase = getActionPhase();
+            boolean validPhase = (item.getTriggerPhase() == ItemTriggerPhase.PRE_ROLL
+                    && phase == TurnPhase.AWAITING_ROLL)
+                    || (item.getTriggerPhase() == ItemTriggerPhase.AWAITING_DECISION
+                    && phase == TurnPhase.AWAITING_DECISION);
+            if (!validPhase) {
+                return save(result(false, "USE_ITEM", actionId,
+                        "INVALID_PHASE", "Không thể dùng vật phẩm ở giai đoạn hiện tại.",
+                        playerId, turnId));
+            }
+
+            if (player.getStatus() != PlayerStatus.ACTIVE) {
+                return save(result(false, "USE_ITEM", actionId,
+                        "PLAYER_NOT_ACTIVE", "Người chơi không ở trạng thái ACTIVE.",
+                        playerId, turnId));
+            }
+
+            if (!item.canUse(player, room, context)) {
+                return save(result(false, "USE_ITEM", actionId,
+                        "CANNOT_USE_ITEM", "Không đủ điều kiện sử dụng vật phẩm.",
+                        playerId, turnId));
+            }
+
+            if (!item.applyEffect(player, room, context)) {
+                return save(result(false, "USE_ITEM", actionId,
+                        "ITEM_EFFECT_FAILED", "Kích hoạt vật phẩm thất bại.",
+                        playerId, turnId));
+            }
+
+            player.getInventory().removeItem(itemId);
+
+            if ("FORTUNE_SWAP".equals(item.getId()) && phase == TurnPhase.AWAITING_DECISION) {
+                swappedPositionThisTurn = true;
+            }
+
+            emit(
+                    EngineEvent.Type.ITEM_USED,
+                    player,
+                    turnId,
+                    Map.of(
+                            "itemId", item.getId(),
+                            "itemName", item.getName()
+                    )
+            );
+
+            return save(result(true, "USE_ITEM", actionId,
+                    "OK", "Đã sử dụng vật phẩm.",
+                    playerId, turnId));
+        }
+    }
+
+    // ================= UPGRADE PROPERTY =================
+
+    public synchronized boolean upgradeProperty(
+            String playerId, int turnId, int tileIndex) {
+        return upgradePropertyInternal(
+                room.getId(), playerId, turnId, tileIndex, newId(), false
+        ).isSuccess();
+    }
+
+    public synchronized ActionResult upgradeProperty(
+            String roomId, String playerId, int turnId, int tileIndex, String actionId) {
+        return upgradePropertyInternal(
+                roomId, playerId, turnId, tileIndex, actionId, true
+        );
+    }
+
+    private ActionResult upgradePropertyInternal(
+            String roomId,
+            String playerId,
+            int turnId,
+            int tileIndex,
+            String actionId,
+            boolean humanAction) {
+
+        synchronized (room) {
+            ActionResult old = findDuplicate(
+                    "UPGRADE_PROPERTY", roomId, playerId, turnId, actionId
+            );
+            if (old != null) {
+                return old;
+            }
+
+            ActionResult invalid = validateBase(
+                    roomId, playerId, turnId, "UPGRADE_PROPERTY", actionId
+            );
+            if (invalid != null) {
+                return save(invalid);
+            }
+
+            Player player = room.getCurrentPlayer();
+            if (humanAction && player.isBot()) {
+                return save(result(false, "UPGRADE_PROPERTY", actionId,
+                        "BOT_CONTROLLED", "Lượt này do Bot điều khiển.",
+                        playerId, turnId));
+            }
+
+            if (getActionPhase() != TurnPhase.AWAITING_DECISION
+                    || player.getStatus() != PlayerStatus.ACTIVE) {
+                return save(result(false, "UPGRADE_PROPERTY", actionId,
+                        "INVALID_PHASE", "Chỉ có thể nâng cấp công trình trong pha quyết định.",
+                        playerId, turnId));
+            }
+
+            Tile tile = room.getBoard().getTile(tileIndex);
+            if (!(tile instanceof StreetProperty)) {
+                return save(result(false, "UPGRADE_PROPERTY", actionId,
+                        "NOT_STREET_PROPERTY", "Ô chỉ định không phải đất ở.",
+                        playerId, turnId));
+            }
+
+            StreetProperty street = (StreetProperty) tile;
+            if (street.getOwner() != player) {
+                return save(result(false, "UPGRADE_PROPERTY", actionId,
+                        "NOT_OWNER", "Bạn không sở hữu ô đất này.",
+                        playerId, turnId));
+            }
+
+            if (!street.canUpgrade()) {
+                return save(result(false, "UPGRADE_PROPERTY", actionId,
+                        "CANNOT_UPGRADE", "Ô đất không thể nâng cấp thêm.",
+                        playerId, turnId));
+            }
+
+            int cost = street.getBuildingCost();
+            if (!player.deductMoney(cost)) {
+                return save(result(false, "UPGRADE_PROPERTY", actionId,
+                        "NOT_ENOUGH_MONEY", "Không đủ tiền để nâng cấp công trình.",
+                        playerId, turnId));
+            }
+
+            if (humanAction) {
+                reclaimHumanControl(player, turnId);
+            }
+
+            street.upgradeBuilding();
+
+            emit(
+                    EngineEvent.Type.PROPERTY_UPGRADED,
+                    player,
+                    turnId,
+                    Map.of(
+                            "tileIndex", String.valueOf(street.getIndex()),
+                            "tileName", street.getName(),
+                            "cost", String.valueOf(cost),
+                            "houseCount", String.valueOf(street.getHouseCount()),
+                            "hasHotel", String.valueOf(street.isHasHotel())
+                    )
+            );
+
+            return save(result(true, "UPGRADE_PROPERTY", actionId,
+                    "OK", "Nâng cấp công trình thành công.",
+                    playerId, turnId));
+        }
+    }
+
+    // ================= SURRENDER =================
+
+    public synchronized ActionResult surrenderPlayer(
+            String roomId, String playerId, String actionId) {
+
+        synchronized (room) {
+            int turnId = room.getTurnId();
+
+            ActionResult old = findDuplicate(
+                    "SURRENDER", roomId, playerId, turnId, actionId
+            );
+            if (old != null) {
+                return old;
+            }
+
+            if (!validActionId(actionId)) {
+                return result(false, "SURRENDER", actionId,
+                        "INVALID_ACTION_ID", "actionId không hợp lệ.",
+                        playerId, turnId);
+            }
+
+            if (!validRoom(roomId)) {
+                return save(result(false, "SURRENDER", actionId,
+                        "INVALID_ROOM", "roomId không hợp lệ.",
+                        playerId, turnId));
+            }
+
+            if (room.getStatus() != RoomStatus.PLAYING) {
+                return save(result(false, "SURRENDER", actionId,
+                        "ROOM_NOT_PLAYING", "Phòng không ở trạng thái PLAYING.",
+                        playerId, turnId));
+            }
+
+            if (playerId == null || playerId.isBlank()) {
+                return save(result(false, "SURRENDER", actionId,
+                        "INVALID_PLAYER", "playerId không hợp lệ.",
+                        null, turnId));
+            }
+
+            Player target = null;
+            for (Player p : room.getPlayers()) {
+                if (p.getId().equals(playerId)) {
+                    target = p;
+                    break;
+                }
+            }
+            if (target == null) {
+                return save(result(false, "SURRENDER", actionId,
+                        "INVALID_PLAYER", "Không tìm thấy người chơi.",
+                        playerId, turnId));
+            }
+
+            if (target.getStatus() == PlayerStatus.BANKRUPT) {
+                return save(result(false, "SURRENDER", actionId,
+                        "ALREADY_BANKRUPT", "Người chơi đã phá sản.",
+                        playerId, turnId));
+            }
+
+            boolean isCurrent = room.getCurrentPlayer() == target;
+            target.declareBankruptcy(null);
+
+            emit(
+                    EngineEvent.Type.PLAYER_SURRENDERED,
+                    target,
+                    turnId,
+                    Collections.emptyMap()
+            );
+
+            if (!checkGameFinished() && isCurrent) {
+                advanceTurn(target, turnId);
+            }
+
+            return save(result(true, "SURRENDER", actionId,
+                    "OK", "Người chơi đã đầu hàng.",
+                    playerId, turnId));
+        }
     }
 
     // ================= END TURN =================
@@ -642,8 +1096,17 @@ public class GameEngine {
             String actionId,
             boolean skipTurnInJail) {
 
-        // Người chơi đang trong tù thì bỏ lượt.
+        // Người chơi đang trong tù thì cập nhật lượt tù trước khi bỏ lượt.
         if (skipTurnInJail) {
+            Tile jailTile = room.getBoard().getTile(10);
+            if (jailTile != null) {
+                jailTile.onLand(player, room);
+            }
+            if (checkGameFinished()) {
+                return result(true, "END_TURN", actionId,
+                        "GAME_FINISHED", "Ván chơi đã kết thúc.",
+                        playerId, turnId);
+            }
             advanceTurn(player, turnId);
 
             return result(true, "END_TURN", actionId,
@@ -696,6 +1159,7 @@ public class GameEngine {
         room.nextTurn();
 
         consecutiveDoubles = 0;
+        swappedPositionThisTurn = false;
         room.setLastDice(null);
         currentPhase = TurnPhase.AWAITING_ROLL;
 
@@ -713,6 +1177,26 @@ public class GameEngine {
                         String.valueOf(room.getTurnId())
                 )
         );
+
+        if (room.getStatus() == RoomStatus.PLAYING
+                && room.getTurnId() >= 10
+                && room.getTurnId() % 8 == 0) {
+            GameEvent randomEvent = GameEventManager.createRandomEvent();
+            if (randomEvent != null) {
+                room.getEventManager().triggerEvent(randomEvent, room);
+                emit(
+                        EngineEvent.Type.SPECIAL_EVENT_TRIGGERED,
+                        nextPlayer,
+                        room.getTurnId(),
+                        Map.of(
+                                "eventId", randomEvent.getId(),
+                                "eventName", randomEvent.getName(),
+                                "description", randomEvent.getDescription(),
+                                "durationTurns", String.valueOf(randomEvent.getDurationTurns())
+                        )
+                );
+            }
+        }
 
         checkGameFinished();
     }
@@ -1145,6 +1629,11 @@ public class GameEngine {
             TILE_RESOLVED,
             PROPERTY_BOUGHT,
             PLAYER_SENT_TO_JAIL,
+            BAIL_PAID,
+            ITEM_USED,
+            PROPERTY_UPGRADED,
+            SPECIAL_EVENT_TRIGGERED,
+            PLAYER_SURRENDERED,
             TURN_TIMED_OUT,
             BOT_TAKEOVER,
             HUMAN_CONTROL_RECLAIMED,

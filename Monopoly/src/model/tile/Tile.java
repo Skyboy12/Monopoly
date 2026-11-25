@@ -14,7 +14,7 @@ import model.Player;
 public abstract class Tile {
     private final int index;
     private final String name;
-    private boolean frozen = false;
+    private volatile boolean frozen = false;
 
     public Tile(int index, String name) {
         this.index = index;

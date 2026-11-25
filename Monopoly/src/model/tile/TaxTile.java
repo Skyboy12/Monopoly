@@ -23,7 +23,7 @@ public class TaxTile extends Tile {
 
     @Override
     public void onLand(Player player, GameRoom room) {
-        if (player == null) {
+        if (player == null || isFrozen()) {
             return;
         }
 

@@ -3,9 +3,11 @@ package model;
 import model.item.Inventory;
 import model.tile.PropertyTile;
 import model.tile.RailroadProperty;
+import model.tile.StreetProperty;
 import model.tile.UtilityProperty;
 
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
 
 /**
@@ -98,18 +100,31 @@ public class Player {
         return false;
     }
 
-    public synchronized boolean pay(int amount, Player receiver) {
+    public boolean pay(int amount, Player receiver) {
         if (amount <= 0) {
             return false;
         }
-        if (this.money >= amount) {
-            this.money -= amount;
-            if (receiver != null) {
-                receiver.addMoney(amount);
+        boolean paid = false;
+        synchronized (this) {
+            if (this.money >= amount) {
+                this.money -= amount;
+                paid = true;
             }
-            return true;
         }
-        return false;
+        if (paid && receiver != null) {
+            receiver.addMoney(amount);
+        }
+        return paid;
+    }
+
+    public synchronized void receivePropertyInternal(PropertyTile prop) {
+        if (prop == null) {
+            return;
+        }
+        if (!this.ownedProperties.contains(prop)) {
+            this.ownedProperties.add(prop);
+        }
+        prop.setOwner(this);
     }
 
     public synchronized void buyProperty(PropertyTile property) {
@@ -120,38 +135,58 @@ public class Player {
         }
     }
 
-    public synchronized void transferProperty(PropertyTile property, Player newOwner) {
-        if (property == null || !this.ownedProperties.contains(property)) {
+    public void transferProperty(PropertyTile property, Player newOwner) {
+        if (property == null) {
             return;
         }
-        this.ownedProperties.remove(property);
-        if (newOwner != null) {
-            newOwner.getOwnedProperties().add(property);
-            property.setOwner(newOwner);
+        synchronized (this) {
+            if (!this.ownedProperties.contains(property)) {
+                return;
+            }
+            this.ownedProperties.remove(property);
+            if (newOwner == null) {
+                property.setOwner(null); // Trả lại về ngân hàng
+                return;
+            }
+        }
+        if (newOwner == this) {
+            receivePropertyInternal(property);
         } else {
-            property.setOwner(null); // Trả lại về ngân hàng
+            newOwner.receivePropertyInternal(property);
         }
     }
 
-    public synchronized void declareBankruptcy(Player creditor) {
-        this.status = PlayerStatus.BANKRUPT;
+    public void declareBankruptcy(Player creditor) {
+        List<PropertyTile> propsToTransfer;
+        int remainingMoney;
+        synchronized (this) {
+            this.status = PlayerStatus.BANKRUPT;
+            propsToTransfer = new ArrayList<>(this.ownedProperties);
+            this.ownedProperties.clear();
+            remainingMoney = this.money;
+            this.money = 0;
 
-        // Bàn giao toàn bộ tài sản cho chủ nợ (nếu có) hoặc trả về ngân hàng
-        for (PropertyTile prop : new ArrayList<>(this.ownedProperties)) {
-            if (creditor != null) {
-                creditor.getOwnedProperties().add(prop);
-                prop.setOwner(creditor);
-            } else {
-                prop.setOwner(null);
+            if (creditor == null) {
+                for (PropertyTile prop : propsToTransfer) {
+                    prop.setMortgaged(false);
+                    if (prop instanceof StreetProperty) {
+                        StreetProperty sp = (StreetProperty) prop;
+                        sp.setHouseCount(0);
+                        sp.setHasHotel(false);
+                    }
+                    prop.setOwner(null);
+                }
             }
         }
-        this.ownedProperties.clear();
 
-        // Chuyển toàn bộ tiền còn lại cho chủ nợ trước khi xóa về 0
-        if (creditor != null && this.money > 0) {
-            creditor.addMoney(this.money);
+        if (creditor != null) {
+            for (PropertyTile prop : propsToTransfer) {
+                creditor.receivePropertyInternal(prop);
+            }
+            if (remainingMoney > 0) {
+                creditor.addMoney(remainingMoney);
+            }
         }
-        this.money = 0;
     }
 
     public synchronized int getRailroadCount() {
@@ -175,7 +210,7 @@ public class Player {
     }
 
     public synchronized List<PropertyTile> getOwnedProperties() {
-        return this.ownedProperties;
+        return Collections.unmodifiableList(new ArrayList<>(this.ownedProperties));
     }
 
     private boolean rentShieldActive = false;
@@ -198,9 +233,16 @@ public class Player {
         int oldPosition = this.position;
         setPosition(this.position + steps);
 
-        // Thưởng $200 khi vượt qua hoặc dừng đúng ô GO (index 0) nếu không ở tù
-        if (this.position < oldPosition && this.status != PlayerStatus.IN_JAIL) {
-            addMoney(200);
+        // Chỉ thưởng $200 khi đi tiến (steps > 0), không ở tù và thực sự đi qua GO
+        if (steps > 0 && this.status != PlayerStatus.IN_JAIL) {
+            int totalPos = oldPosition + steps;
+            int lapsPassed = totalPos / 40;
+            if (this.position == 0 && lapsPassed > 0) {
+                lapsPassed--;
+            }
+            if (lapsPassed > 0) {
+                addMoney(200 * lapsPassed);
+            }
         }
     }
 

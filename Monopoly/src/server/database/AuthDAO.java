@@ -97,15 +97,24 @@ public class AuthDAO {
         );
     }
 
+    private static final server.security.PasswordEncoderUtil PASSWORD_ENCODER = new server.security.PasswordEncoderUtil();
+
+    /**
+     * @deprecated Sử dụng {@link server.security.PasswordEncoderUtil#encode(String)}.
+     */
+    @Deprecated
     private static String hashPassword(String password) {
-        byte[] salt = new byte[16];
-        RANDOM.nextBytes(salt);
-        String saltB64 = Base64.getEncoder().encodeToString(salt);
-        String hashB64 = sha256Base64(salt, password);
-        return saltB64 + ":" + hashB64;
+        return PASSWORD_ENCODER.encode(password);
     }
 
+    /**
+     * @deprecated Sử dụng {@link server.security.PasswordEncoderUtil#matches(String, String)}.
+     */
+    @Deprecated
     private static boolean verifyPassword(String password, String stored) {
+        if (stored != null && (stored.startsWith("$pbkdf2$") || stored.startsWith("$2a$10$"))) {
+            return PASSWORD_ENCODER.matches(password, stored);
+        }
         if (stored == null || !stored.contains(":")) {
             return false;
         }
@@ -118,6 +127,7 @@ public class AuthDAO {
         );
     }
 
+    @Deprecated
     private static String sha256Base64(byte[] salt, String password) {
         try {
             MessageDigest md = MessageDigest.getInstance("SHA-256");

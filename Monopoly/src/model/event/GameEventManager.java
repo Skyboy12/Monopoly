@@ -3,11 +3,10 @@ package model.event;
 import model.GameRoom;
 import model.Player;
 
+import java.security.SecureRandom;
 import java.util.ArrayList;
-import java.util.HashMap;
 import java.util.Iterator;
 import java.util.List;
-import java.util.Map;
 
 /**
  * Quản lý vòng đời và thời hạn hiệu lực của các sự kiện đang diễn ra trong phòng cờ.
@@ -23,12 +22,22 @@ import java.util.Map;
  * - Periodic Event Trigger: Sau mỗi 4 - 5 vòng chơi (lap), tự động kích hoạt 1 sự kiện ngẫu nhiên.
  */
 public class GameEventManager {
-    private final List<GameEvent> activeEvents;
-    private final Map<GameEvent, Integer> remainingTurns;
+    private static final SecureRandom RANDOM = new SecureRandom();
+
+    private static final class ActiveEventEntry {
+        final GameEvent event;
+        int remainingTurns;
+
+        ActiveEventEntry(GameEvent event, int remainingTurns) {
+            this.event = event;
+            this.remainingTurns = remainingTurns;
+        }
+    }
+
+    private final List<ActiveEventEntry> activeEntries;
 
     public GameEventManager() {
-        this.activeEvents = new ArrayList<>();
-        this.remainingTurns = new HashMap<>();
+        this.activeEntries = new ArrayList<>();
     }
 
     /**
@@ -40,8 +49,7 @@ public class GameEventManager {
         }
         event.onTrigger(room);
         if (event.getDurationTurns() > 0) {
-            activeEvents.add(event);
-            remainingTurns.put(event, event.getDurationTurns());
+            activeEntries.add(new ActiveEventEntry(event, event.getDurationTurns()));
         } else {
             event.onExpire(room);
         }
@@ -54,17 +62,72 @@ public class GameEventManager {
         if (room == null) {
             return;
         }
-        Iterator<GameEvent> iterator = activeEvents.iterator();
+        List<GameEvent> expiredEvents = new ArrayList<>();
+        Iterator<ActiveEventEntry> iterator = activeEntries.iterator();
         while (iterator.hasNext()) {
-            GameEvent event = iterator.next();
-            int turnsLeft = remainingTurns.getOrDefault(event, 0) - 1;
-            if (turnsLeft <= 0) {
-                event.onExpire(room);
-                remainingTurns.remove(event);
+            ActiveEventEntry entry = iterator.next();
+            entry.remainingTurns -= 1;
+            if (entry.remainingTurns <= 0) {
+                expiredEvents.add(entry.event);
                 iterator.remove();
-            } else {
-                remainingTurns.put(event, turnsLeft);
             }
+        }
+        for (GameEvent expired : expiredEvents) {
+            expired.onExpire(room);
+        }
+    }
+
+    public synchronized boolean hasActiveEventId(String id) {
+        if (id == null) {
+            return false;
+        }
+        for (ActiveEventEntry entry : activeEntries) {
+            if (id.equals(entry.event.getId())) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    public synchronized boolean isTileFrozenByOtherEvent(FrozenTileEvent expiring, int idx) {
+        for (ActiveEventEntry entry : activeEntries) {
+            if (entry.event instanceof FrozenTileEvent && entry.event != expiring) {
+                FrozenTileEvent other = (FrozenTileEvent) entry.event;
+                if (other.getFrozenTileIndices().contains(idx)) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    public synchronized int getRemainingTurns(GameEvent event) {
+        if (event == null) {
+            return 0;
+        }
+        for (ActiveEventEntry entry : activeEntries) {
+            if (entry.event == event) {
+                return entry.remainingTurns;
+            }
+        }
+        return 0;
+    }
+
+    public static GameEvent createRandomEvent() {
+        int pick = RANDOM.nextInt(6);
+        switch (pick) {
+            case 0:
+                return new RichTaxEvent();
+            case 1:
+                return new PropertyBoomEvent();
+            case 2:
+                return new ContinentalDriftEvent();
+            case 3:
+                return new StimulusDayEvent();
+            case 4:
+                return new EarthquakeEvent();
+            default:
+                return new FrozenTileEvent();
         }
     }
 
@@ -72,7 +135,11 @@ public class GameEventManager {
      * Lấy danh sách các sự kiện đang có hiệu lực.
      */
     public synchronized List<GameEvent> getActiveEvents() {
-        return new ArrayList<>(activeEvents);
+        List<GameEvent> result = new ArrayList<>(activeEntries.size());
+        for (ActiveEventEntry entry : activeEntries) {
+            result.add(entry.event);
+        }
+        return result;
     }
 }
 

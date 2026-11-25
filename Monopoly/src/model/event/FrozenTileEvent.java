@@ -50,9 +50,13 @@ public class FrozenTileEvent extends GameEvent {
             return;
         }
         for (int idx : frozenTileIndices) {
-            Tile tile = room.getBoard().getTile(idx);
-            if (tile != null) {
-                tile.setFrozen(false);
+            boolean heldByOther = room.getEventManager() != null
+                    && room.getEventManager().isTileFrozenByOtherEvent(this, idx);
+            if (!heldByOther) {
+                Tile tile = room.getBoard().getTile(idx);
+                if (tile != null) {
+                    tile.setFrozen(false);
+                }
             }
         }
         frozenTileIndices.clear();

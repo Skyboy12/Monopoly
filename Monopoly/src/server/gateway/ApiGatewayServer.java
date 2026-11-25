@@ -95,7 +95,7 @@ public class ApiGatewayServer {
                 new GatewayConfig(
                         port,
                         originFilter != null && originFilter.isProtectionEnabled() ? "prod" : "dev",
-                        null,
+                        originFilter != null ? originFilter.getExpectedSecretKey() : null,
                         GatewayConfig.DEFAULT_JWT_SECRET,
                         GatewayConfig.DEFAULT_JWT_VALIDITY_MS
                 ),
@@ -208,6 +208,9 @@ public class ApiGatewayServer {
                     && type != GameEngine.EngineEvent.Type.BOT_TAKEOVER
                     && type != GameEngine.EngineEvent.Type.DICE_ROLLED
                     && type != GameEngine.EngineEvent.Type.PROPERTY_BOUGHT
+                    && type != GameEngine.EngineEvent.Type.PROPERTY_UPGRADED
+                    && type != GameEngine.EngineEvent.Type.BAIL_PAID
+                    && type != GameEngine.EngineEvent.Type.SPECIAL_EVENT_TRIGGERED
                     && type != GameEngine.EngineEvent.Type.EXTRA_ROLL_GRANTED
                     && type != GameEngine.EngineEvent.Type.TURN_ENDED
                     && type != GameEngine.EngineEvent.Type.GAME_FINISHED) {
@@ -235,21 +238,35 @@ public class ApiGatewayServer {
                                 roomId,
                                 actorName + " hết giờ lượt #" + turnId + " — Bot đang tiếp quản!"
                         );
+                        GameEngine engine = roomManagerService.getEngine(roomId);
+                        String actionPhase = (engine != null) ? engine.getEffectivePhase().name() : "AWAITING_ROLL";
+                        int currentTurnId;
+                        synchronized (room) {
+                            currentTurnId = room.getTurnId();
+                        }
                         String payload = String.format(
-                                "{\"playerId\":\"%s\",\"playerName\":\"%s\",\"reason\":\"TIMEOUT\"}",
+                                "{\"playerId\":\"%s\",\"playerName\":\"%s\",\"reason\":\"TIMEOUT\",\"turnId\":%d,\"actionPhase\":\"%s\"}",
                                 SimpleJson.escape(playerId),
-                                SimpleJson.escape(actorName)
+                                SimpleJson.escape(actorName),
+                                turnId,
+                                SimpleJson.escape(actionPhase)
                         );
                         stompBroker.broadcastToRoom(roomId, new GameMessage(
                                 "TURN_TIMED_OUT", playerId, roomId, turnId, payload
                         ));
-                        stompBroker.broadcastRoomSnapshot(roomId);
+                        if (currentTurnId == turnId) {
+                            stompBroker.broadcastRoomSnapshot(roomId);
+                        }
                     }
                     case BOT_TAKEOVER -> {
+                        GameEngine engine = roomManagerService.getEngine(roomId);
+                        String actionPhase = (engine != null) ? engine.getEffectivePhase().name() : "AWAITING_ROLL";
                         String payload = String.format(
-                                "{\"playerId\":\"%s\",\"playerName\":\"%s\"}",
+                                "{\"playerId\":\"%s\",\"playerName\":\"%s\",\"turnId\":%d,\"actionPhase\":\"%s\"}",
                                 SimpleJson.escape(playerId),
-                                SimpleJson.escape(actorName)
+                                SimpleJson.escape(actorName),
+                                turnId,
+                                SimpleJson.escape(actionPhase)
                         );
                         stompBroker.broadcastToRoom(roomId, new GameMessage(
                                 "BOT_TAKEOVER", playerId, roomId, turnId, payload
@@ -262,7 +279,7 @@ public class ApiGatewayServer {
                         int newPosition = 0;
                         GameEngine engine = roomManagerService.getEngine(roomId);
                         // Lấy phase ngoài synchronized (room) để tránh đảo ngược thứ tự khóa engine -> room.
-                        String enginePhase = (engine != null) ? engine.getCurrentPhase().name() : "AWAITING_DECISION";
+                        String enginePhase = (engine != null) ? engine.getEffectivePhase().name() : "AWAITING_DECISION";
                         String phase = "AWAITING_DECISION";
                         synchronized (room) {
                             Player p = findPlayerInRoom(room, playerId);
@@ -303,13 +320,73 @@ public class ApiGatewayServer {
                                 "PROPERTY_BOUGHT", playerId, roomId, turnId, payload
                         ));
                     }
+                    case PROPERTY_UPGRADED -> {
+                        int tileIndex = parseIntSafe(data.get("tileIndex"), -1);
+                        String tileName = data.getOrDefault("tileName", "");
+                        int cost = parseIntSafe(data.get("cost"), 0);
+                        int houseCount = parseIntSafe(data.get("houseCount"), 0);
+                        boolean hasHotel = Boolean.parseBoolean(data.getOrDefault("hasHotel", "false"));
+                        String levelLabel = hasHotel ? "khách sạn" : ("nhà cấp " + houseCount);
+                        roomManagerService.appendRoomLog(
+                                roomId,
+                                String.format("%s đã nâng cấp %s lên %s ($%d).", actorName, tileName, levelLabel, cost)
+                        );
+                        String payload = String.format(
+                                "{\"tileIndex\":%d,\"tileName\":\"%s\",\"cost\":%d,\"ownerId\":\"%s\",\"houseCount\":%d,\"hasHotel\":%b}",
+                                tileIndex,
+                                SimpleJson.escape(tileName),
+                                cost,
+                                SimpleJson.escape(playerId),
+                                houseCount,
+                                hasHotel
+                        );
+                        stompBroker.broadcastToRoom(roomId, new GameMessage(
+                                "PROPERTY_UPGRADED", playerId, roomId, turnId, payload
+                        ));
+                        stompBroker.broadcastRoomSnapshot(roomId);
+                    }
+                    case BAIL_PAID -> {
+                        roomManagerService.appendRoomLog(
+                                roomId,
+                                actorName + " đã nộp $50 bảo lãnh ra tù."
+                        );
+                        String payload = String.format(
+                                "{\"playerId\":\"%s\",\"amount\":50}",
+                                SimpleJson.escape(playerId)
+                        );
+                        stompBroker.broadcastToRoom(roomId, new GameMessage(
+                                "BAIL_PAID", playerId, roomId, turnId, payload
+                        ));
+                        stompBroker.broadcastRoomSnapshot(roomId);
+                    }
+                    case SPECIAL_EVENT_TRIGGERED -> {
+                        String eventId = data.getOrDefault("eventId", "");
+                        String eventName = data.getOrDefault("eventName", eventId);
+                        String description = data.getOrDefault("description", "");
+                        int durationTurns = parseIntSafe(data.get("durationTurns"), 1);
+                        roomManagerService.appendRoomLog(
+                                roomId,
+                                String.format("Sự kiện đặc biệt: %s — %s", eventName, description)
+                        );
+                        String payload = String.format(
+                                "{\"eventId\":\"%s\",\"eventName\":\"%s\",\"description\":\"%s\",\"durationTurns\":%d}",
+                                SimpleJson.escape(eventId),
+                                SimpleJson.escape(eventName),
+                                SimpleJson.escape(description),
+                                durationTurns
+                        );
+                        stompBroker.broadcastToRoom(roomId, new GameMessage(
+                                "SPECIAL_EVENT_TRIGGERED", "SERVER", roomId, turnId, payload
+                        ));
+                        stompBroker.broadcastRoomSnapshot(roomId);
+                    }
                     case EXTRA_ROLL_GRANTED -> {
                         roomManagerService.appendRoomLog(
                                 roomId,
                                 "[Bot] " + actorName + " gieo đôi và được tung thêm lượt!"
                         );
                         GameEngine engine = roomManagerService.getEngine(roomId);
-                        String phase = (engine != null) ? engine.getCurrentPhase().name() : "AWAITING_ROLL";
+                        String phase = (engine != null) ? engine.getEffectivePhase().name() : "AWAITING_ROLL";
                         String roomStatus;
                         int currentTurnId;
                         synchronized (room) {
@@ -338,7 +415,7 @@ public class ApiGatewayServer {
                                 String.format("Chuyển lượt sang %s (Turn #%d).", nextName, nextTurnId)
                         );
                         GameEngine engine = roomManagerService.getEngine(roomId);
-                        String phase = (engine != null) ? engine.getCurrentPhase().name() : "AWAITING_ROLL";
+                        String phase = (engine != null) ? engine.getEffectivePhase().name() : "AWAITING_ROLL";
                         String roomStatus;
                         synchronized (room) {
                             roomStatus = room.getStatus().name();
@@ -654,11 +731,30 @@ public class ApiGatewayServer {
                 HttpResponseWriter.writeGameMessage(out, 404, err, keepAlive);
                 return;
             }
+            GameRoom room = engine.getRoom();
+            boolean isMember = false;
+            synchronized (room) {
+                for (Player p : room.getPlayers()) {
+                    if (userId.equals(p.getId())) {
+                        isMember = true;
+                        break;
+                    }
+                }
+            }
+            if (!isMember) {
+                GameMessage err = new GameMessage(
+                        "ERROR", userId, roomId, 0,
+                        "{\"error\":\"FORBIDDEN_NOT_IN_ROOM\",\"message\":\"Bạn không phải thành viên của phòng chơi này.\"}"
+                );
+                HttpResponseWriter.writeGameMessage(out, 403, err, keepAlive);
+                return;
+            }
             GameMessage snapshot = wsController.buildSnapshotMessage(
                     engine,
                     roomManagerService.getHostUserId(roomId),
                     roomManagerService.getTurnDeadlineEpochMs(roomId),
-                    roomManagerService.getRoomLogs(roomId)
+                    roomManagerService.getRoomLogs(roomId),
+                    roomManagerService.getTurnTimeoutSeconds()
             );
             HttpResponseWriter.writeGameMessage(out, 200, snapshot, keepAlive);
             return;
@@ -785,7 +881,7 @@ public class ApiGatewayServer {
     }
 
     private void recordFinishedMatchElo(GameRoom room) {
-        if (!userRepository.isDatabaseEnabled() || room == null) {
+        if (room == null) {
             return;
         }
         String winnerIdStr = null;
@@ -802,19 +898,50 @@ public class ApiGatewayServer {
         if (winnerIdStr == null || loserIds.isEmpty()) {
             return;
         }
+        if (!userRepository.isDatabaseEnabled()) {
+            Optional<UserAccount> winnerOpt = userRepository.findById(winnerIdStr);
+            if (winnerOpt.isPresent()) {
+                UserAccount winner = winnerOpt.get();
+                int winnerElo = winner.getRatingPoints();
+                int currentWinnerElo = winnerElo;
+                for (String loserIdStr : loserIds) {
+                    if (winnerIdStr.equals(loserIdStr)) {
+                        continue;
+                    }
+                    Optional<UserAccount> loserOpt = userRepository.findById(loserIdStr);
+                    if (loserOpt.isPresent()) {
+                        UserAccount loser = loserOpt.get();
+                        int loserElo = loser.getRatingPoints();
+                        double expectedWin = EloDAO.expectedScore(winnerElo, loserElo);
+                        double expectedLose = EloDAO.expectedScore(loserElo, winnerElo);
+                        int winnerDelta = (int) Math.round(32 * (1.0 - expectedWin));
+                        currentWinnerElo = Math.max(100, currentWinnerElo + winnerDelta);
+                        int newLoserElo = Math.max(100, (int) Math.round(loserElo + 32 * (0.0 - expectedLose)));
+                        loser.setRatingPoints(newLoserElo);
+                        userRepository.save(loser);
+                    }
+                }
+                winner.setRatingPoints(currentWinnerElo);
+                userRepository.save(winner);
+            }
+            return;
+        }
         try {
             int winnerId = Integer.parseInt(winnerIdStr);
-            EloDAO eloDao = new EloDAO();
+            java.util.List<Integer> numericLosers = new java.util.ArrayList<>();
             for (String loserStr : loserIds) {
                 try {
                     int loserId = Integer.parseInt(loserStr);
                     if (winnerId != loserId) {
-                        eloDao.recordMatch(winnerId, loserId);
+                        numericLosers.add(loserId);
                     }
-                } catch (Exception ignored) {
+                } catch (NumberFormatException ignored) {
                 }
             }
-        } catch (NumberFormatException ignored) {
+            if (!numericLosers.isEmpty()) {
+                new EloDAO().recordMultiplayerMatch(winnerId, numericLosers);
+            }
+        } catch (Exception ignored) {
         }
     }
 

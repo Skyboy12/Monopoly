@@ -16,6 +16,16 @@
 export interface Env {
   ORIGIN_URL: string;
   ORIGIN_SECRET_KEY?: string;
+  ALLOW_INSECURE_ORIGIN?: string;
+}
+
+function isLocalOrigin(originBase: string): boolean {
+  try {
+    const parsed = new URL(originBase);
+    return parsed.hostname === 'localhost' || parsed.hostname === '127.0.0.1';
+  } catch {
+    return false;
+  }
 }
 
 const MALICIOUS_PATH_REGEX = /\.(php|asp|aspx|jsp|env|git|yml|yaml|config|ini|sh|bak|swp)|wp-admin|phpmyadmin|cgi-bin|\/\.\./i;
@@ -67,15 +77,59 @@ export default {
       return new Response('Route not found', { status: 404 });
     }
 
-    // Health check endpoint tại Edge
+    const originBase = env.ORIGIN_URL || 'http://localhost:8080';
+
+    // Fail closed (500) if ORIGIN_SECRET_KEY is missing for non-local/prod origin
+    if (!env.ORIGIN_SECRET_KEY && env.ALLOW_INSECURE_ORIGIN !== 'true' && !isLocalOrigin(originBase)) {
+      return new Response(
+        JSON.stringify({
+          error: 'MISCONFIGURED_ORIGIN_SECRET',
+          message: 'ORIGIN_SECRET_KEY is required when origin shielding is enabled',
+        }),
+        {
+          status: 500,
+          headers: {
+            'Content-Type': 'application/json',
+            'Access-Control-Allow-Origin': '*',
+          },
+        }
+      );
+    }
+
+    // Health check endpoint tại Edge (kèm kiểm tra kết nối tới Origin)
     if (isHealth) {
-      return new Response(JSON.stringify({ status: 'UP', firewall: 'ACTIVE', timestamp: Date.now() }), {
-        status: 200,
-        headers: {
-          'Content-Type': 'application/json',
-          'Access-Control-Allow-Origin': '*',
-        },
-      });
+      let originStatus = 'DOWN';
+      let originHttpStatus: number | null = null;
+      try {
+        const healthHeaders = new Headers();
+        if (env.ORIGIN_SECRET_KEY) {
+          healthHeaders.set('X-Origin-Verify', env.ORIGIN_SECRET_KEY);
+        }
+        const originHealth = await fetch(new URL('/health', originBase).toString(), {
+          method: 'GET',
+          headers: healthHeaders,
+        });
+        originHttpStatus = originHealth.status;
+        originStatus = originHealth.ok ? 'UP' : 'DEGRADED';
+      } catch {
+        originStatus = 'UNREACHABLE';
+      }
+      return new Response(
+        JSON.stringify({
+          status: 'UP',
+          firewall: 'ACTIVE',
+          originStatus,
+          originHttpStatus,
+          timestamp: Date.now(),
+        }),
+        {
+          status: 200,
+          headers: {
+            'Content-Type': 'application/json',
+            'Access-Control-Allow-Origin': '*',
+          },
+        }
+      );
     }
 
     // 6. Kiểm tra giới hạn kích thước Payload (Content-Length <= 100 KB)
@@ -134,7 +188,6 @@ export default {
     }
 
     // 10. Chuyển tiếp Request tới Origin kèm Secret Header (Origin Shielding)
-    const originBase = env.ORIGIN_URL || 'http://localhost:8080';
     const originUrl = new URL(path + url.search, originBase);
     const newHeaders = new Headers(request.headers);
 

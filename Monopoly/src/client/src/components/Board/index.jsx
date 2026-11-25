@@ -21,10 +21,26 @@ export default function Board({
   dice = null,
   canRoll = false,
   rolling = false,
+  isInJail = false,
+  turnsInJail = 0,
   onRoll,
+  isMyTurn = false,
+  canBuy = false,
+  buyPrice = 0,
+  onBuy,
+  canUpgrade = false,
+  upgradeCost = 50,
+  onUpgrade,
+  canPayBail = false,
+  onPayBail,
+  canEndTurn = false,
+  onEndTurn,
+  botControl = false,
   roomStatus = 'WAITING',
   phase = 'AWAITING_ROLL',
   statusHeadline = 'Đang đồng bộ trạng thái...',
+  activeEvents = [],
+  rentMultiplier = 1,
 }) {
   useEffect(() => {
     const handleKeyDown = (event) => {
@@ -84,13 +100,17 @@ export default function Board({
                     : 'right'
             const edgeClass = corner ? '' : `tile-edge-${edgeSide}`
             const hasPawns = playersHere.length > 0
+            const isChance = tile.type === 'CHANCE'
+            const isChest = tile.type === 'COMMUNITY_CHEST'
+            const houseCount = Number(tile.houseCount ?? 0)
+            const hasHotel = Boolean(tile.hasHotel)
 
             return (
               <div
-                className={`board-tile ${corner ? 'corner-tile' : ''} ${edgeClass} ${hasPawns ? 'has-pawns' : ''} ${tile.frozen ? 'tile-frozen' : ''} ${isActiveHere ? 'tile-active' : ''}`}
+                className={`board-tile ${corner ? 'corner-tile' : ''} ${edgeClass} ${hasPawns ? 'has-pawns' : ''} ${tile.frozen ? 'tile-frozen' : ''} ${isActiveHere ? 'tile-active' : ''} ${isChance ? 'tile-chance' : ''} ${isChest ? 'tile-chest' : ''}`}
                 style={{ gridRow: position.row, gridColumn: position.col }}
                 key={tile.index}
-                title={`#${tile.index} ${tile.name}${tile.price > 0 ? ` ($${tile.price})` : ''}`}
+                title={`#${tile.index} ${tile.name}${tile.price > 0 ? ` ($${tile.price})` : ''}${hasHotel ? ' • Khách sạn' : houseCount > 0 ? ` • ${houseCount} nhà` : ''}`}
               >
                 {isStreet && (
                   <div
@@ -100,6 +120,19 @@ export default function Board({
                 )}
                 {ownerColor && (
                   <span className="tile-owner" style={{ background: ownerColor }} />
+                )}
+                {hasHotel ? (
+                  <span className="tile-building tile-hotel" title="Khách sạn">
+                    KS
+                  </span>
+                ) : (
+                  houseCount > 0 && (
+                    <span className="tile-building tile-houses" title={`${houseCount} nhà`}>
+                      {Array.from({ length: Math.min(4, houseCount) }).map((_, i) => (
+                        <i key={i} />
+                      ))}
+                    </span>
+                  )
                 )}
                 {tile.frozen && (
                   <span className="tile-frozen-badge" title="Ô đang đóng băng">
@@ -131,9 +164,18 @@ export default function Board({
                 <Zap size={17} fill="currentColor" />
               </div>
               <div>
-                <small>{roomStatus === 'PLAYING' ? phase : roomStatus}</small>
+                <small>
+                  {activeEvents.length > 0
+                    ? activeEvents.map((ev) => ev.name || ev.eventName || ev.id).join(' • ')
+                    : roomStatus === 'PLAYING'
+                      ? phase
+                      : roomStatus}
+                </small>
                 <strong>{statusHeadline}</strong>
               </div>
+              {rentMultiplier > 1 && (
+                <span className="event-x">x{rentMultiplier} TIỀN THUÊ</span>
+              )}
             </div>
             <div className="dice-zone">
               <div className="dice-cubes">
@@ -147,20 +189,72 @@ export default function Board({
               <div className="dice-total">{totalText}</div>
             </div>
             <div className="board-action">
-              <button
-                type="button"
-                className="roll-main"
-                onClick={onRoll}
-                disabled={!canRoll || rolling}
-              >
-                <Dices size={20} />
-                {rolling ? 'Đang tung...' : canRoll ? 'Gieo xúc xắc' : 'Chờ lượt'}
-              </button>
+              {isMyTurn && phase === 'AWAITING_DECISION' ? (
+                <div className="board-quick-actions">
+                  {canBuy && (
+                    <button type="button" className="quick-btn quick-buy" onClick={onBuy}>
+                      Mua đất (${buyPrice})
+                    </button>
+                  )}
+                  {canUpgrade && (
+                    <button type="button" className="quick-btn quick-upgrade" onClick={onUpgrade}>
+                      Nâng cấp (${upgradeCost})
+                    </button>
+                  )}
+                  {canEndTurn && (
+                    <button type="button" className="quick-btn quick-end" onClick={onEndTurn}>
+                      Kết thúc lượt
+                    </button>
+                  )}
+                </div>
+              ) : (
+                <>
+                  <button
+                    type="button"
+                    className="roll-main"
+                    onClick={onRoll}
+                    disabled={!canRoll || rolling}
+                  >
+                    <Dices size={20} />
+                    {rolling
+                      ? 'Đang tung...'
+                      : canRoll
+                        ? isInJail
+                          ? 'Thử gieo đôi ra tù'
+                          : 'Gieo xúc xắc'
+                        : 'Chờ lượt'}
+                  </button>
+                  {isMyTurn && isInJail && canRoll && (canPayBail || canEndTurn) && (
+                    <div className="board-quick-actions">
+                      {canPayBail && (
+                        <button type="button" className="quick-btn quick-bail" onClick={onPayBail}>
+                          Bảo lãnh $50
+                        </button>
+                      )}
+                      {canEndTurn && (
+                        <button type="button" className="quick-btn quick-end" onClick={onEndTurn}>
+                          Bỏ lượt
+                        </button>
+                      )}
+                    </div>
+                  )}
+                </>
+              )}
               <small>
-                {canRoll ? (
-                  <>
-                    Nhấn nút hoặc phím <kbd>Space</kbd> để tung
-                  </>
+                {botControl ? (
+                  'Bot đang tiếp quản lượt...'
+                ) : isMyTurn && phase === 'AWAITING_DECISION' ? (
+                  'Chọn hành động nhanh bên trên hoặc ở bảng bên'
+                ) : canRoll ? (
+                  isInJail ? (
+                    <>
+                      Lượt tù {turnsInJail}/3 • Nhấn nút hoặc <kbd>Space</kbd> để thử gieo đôi
+                    </>
+                  ) : (
+                    <>
+                      Nhấn nút hoặc phím <kbd>Space</kbd> để tung
+                    </>
+                  )
                 ) : (
                   'Điều khiển mở khóa khi tới lượt gieo xúc xắc của bạn'
                 )}

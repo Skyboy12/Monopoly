@@ -27,7 +27,9 @@ public class PropertyBoomEvent extends GameEvent {
     @Override
     public void onExpire(GameRoom room) {
         if (room != null) {
-            room.setRentMultiplier(1);
+            if (room.getEventManager() == null || !room.getEventManager().hasActiveEventId("PROPERTY_BOOM")) {
+                room.setRentMultiplier(1);
+            }
         }
     }
 }

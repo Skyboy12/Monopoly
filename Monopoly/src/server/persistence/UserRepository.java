@@ -16,9 +16,18 @@ import java.util.concurrent.ConcurrentHashMap;
  * Repository truy xuất dữ liệu tài khoản người dùng (hỗ trợ cả in-memory và MySQL/MariaDB).
  */
 public class UserRepository {
+    public static final class DuplicateUsernameException extends RuntimeException {
+        private static final long serialVersionUID = 1L;
+
+        public DuplicateUsernameException(String message) {
+            super(message);
+        }
+    }
+
     private final boolean useDatabase;
     private final ConcurrentHashMap<String, UserAccount> usersById = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<String, UserAccount> usersByUsername = new ConcurrentHashMap<>();
+    private final Object inMemoryLock = new Object();
 
     public UserRepository() {
         this(false);
@@ -41,9 +50,16 @@ public class UserRepository {
             throw new IllegalArgumentException("UserAccount không được null.");
         }
         if (!useDatabase) {
-            usersById.put(user.getId(), user);
-            usersByUsername.put(user.getUsername().toLowerCase(), user);
-            return user;
+            synchronized (inMemoryLock) {
+                String lowerUsername = user.getUsername().toLowerCase();
+                UserAccount existingByUsername = usersByUsername.get(lowerUsername);
+                if (existingByUsername != null && !existingByUsername.getId().equals(user.getId())) {
+                    throw new DuplicateUsernameException("Username đã tồn tại.");
+                }
+                usersById.put(user.getId(), user);
+                usersByUsername.put(lowerUsername, user);
+                return user;
+            }
         }
         return saveToDatabase(user);
     }
@@ -165,6 +181,9 @@ public class UserRepository {
             }
             throw new IllegalStateException("Không lấy được ID người dùng vừa tạo từ cơ sở dữ liệu.");
         } catch (SQLException e) {
+            if ("23000".equals(e.getSQLState()) || e.getErrorCode() == 1062) {
+                throw new DuplicateUsernameException("Username đã tồn tại.");
+            }
             throw new IllegalStateException("Lỗi lưu tài khoản mới vào cơ sở dữ liệu.", e);
         }
     }

@@ -12,20 +12,20 @@ Dự án được thiết kế và cài đặt bám sát 4 tính chất cốt l�
 - **Hệ thống Ô cờ (`Tile` & `PropertyTile`)**: Lớp trừu tượng `Tile` định nghĩa khuôn mẫu chung cho mọi ô trên bàn cờ (chỉ số `index`, tên `name`, trạng thái đóng băng `frozen`, và phương thức trừu tượng `onLand(Player, GameRoom)`). Lớp `PropertyTile` kế thừa `Tile` và tiếp tục trừu tượng hóa `calculateRent(GameRoom)` để các loại tài sản cụ thể tự định nghĩa cách tính tiền thuê.
 - **Hệ thống Sự kiện (`GameEvent`)**: Lớp trừu tượng `GameEvent` định nghĩa vòng đời của một sự kiện đặc biệt thông qua `onTrigger(GameRoom)` và `onExpire(GameRoom)`, giúp `GameEventManager` quản lý thời hạn hiệu lực mà không cần biết chi tiết bên trong từng sự kiện.
 - **Hệ thống Vật phẩm (`Item`)**: Lớp trừu tượng `Item` quy định chuẩn `canUse(Player, GameRoom, ItemTargetContext)` và `applyEffect(Player, GameRoom, ItemTargetContext)` gắn với `ItemTriggerPhase` (`PRE_ROLL`, `ON_LAND`, `AWAITING_DECISION`).
-- **Hệ thống Thẻ bài (`Card`) & Bot AI (`BotStrategy`)**: Tách biệt giao diện hành vi (`apply(Player, GameRoom)` cho thẻ Cơ hội/Khí vận, `decideAction(...)` cho chiến lược Bot) khỏi phần thực thi cụ thể.
+- **Hệ thống Thẻ bài (`Card`) & Bot AI (`BotStrategy`)**: Tách biệt giao diện hành vi (`apply(Player, GameRoom)` cho thẻ Cơ hội/Khí vận, `playTurn(GameEngine, Player)` cho chiến lược Bot) khỏi phần thực thi cụ thể.
 
 ### 1.2. Tính Kế thừa (Inheritance)
 - **Phân cấp Ô cờ (`model.tile.*`)**:
   - `Tile` ➔ `GoTile`, `JailTile`, `GoToJailTile`, `TaxTile`, `CardTile`, `FreeParkingTile`, `PropertyTile`
-  - `PropertyTile` ➔ `StreetTile` (đất có nhà/khách sạn), `RailroadTile` (nhà ga), `UtilityTile` (công ty điện/nước).
+  - `PropertyTile` ➔ `StreetProperty` (đất có nhà/khách sạn), `RailroadProperty` (nhà ga), `UtilityProperty` (công ty điện/nước).
 - **Phân cấp Sự kiện (`model.event.*`)**:
   - `GameEvent` ➔ `RichTaxEvent`, `PropertyBoomEvent`, `ContinentalDriftEvent`, `StimulusDayEvent`, `EarthquakeEvent`, `FrozenTileEvent`.
 - **Phân cấp Vật phẩm (`model.item.*`)**:
-  - `Item` ➔ `MagicDiceItem`, `RentShieldItem`, `DynamiteItem`, `FortuneSwapItem`, `ArrestWarrantItem`.
+  - `Item` ➔ `MagicDiceItem`, `RentShieldItem`, `HostileTakeoverItem`, `DynamiteItem`, `FortuneSwapItem`, `ArrestWarrantItem`.
 
 ### 1.3. Tính Đa hình (Polymorphism)
-- **Đa hình khi đáp ô (`tile.onLand(player, room)`)**: Trong `GameEngine.performRoll()`, engine chỉ cần gọi `tile.onLand(player, room)` trên tham chiếu `Tile` mà không cần `if/else` kiểm tra loại ô. Tùy vào đối tượng thực tế (`StreetTile`, `TaxTile`, `GoToJailTile`, `CardTile`,...), hành vi tương ứng sẽ được thực thi.
-- **Đa hình khi tính tiền thuê (`calculateRent(room)`)**: `PropertyTile.onLand()` gọi `calculateRent(room)` — `StreetTile` tính theo số nhà/khách sạn, `RailroadTile` tính theo số nhà ga sở hữu, `UtilityTile` tính theo tổng xúc xắc.
+- **Đa hình khi đáp ô (`tile.onLand(player, room)`)**: Trong `GameEngine.performRoll()`, engine chỉ cần gọi `tile.onLand(player, room)` trên tham chiếu `Tile` mà không cần `if/else` kiểm tra loại ô. Tùy vào đối tượng thực tế (`StreetProperty`, `TaxTile`, `GoToJailTile`, `CardTile`,...), hành vi tương ứng sẽ được thực thi.
+- **Đa hình khi tính tiền thuê (`calculateRent(room)`)**: `PropertyTile.onLand()` gọi `calculateRent(room)` — `StreetProperty` tính theo số nhà/khách sạn, `RailroadProperty` tính theo số nhà ga sở hữu, `UtilityProperty` tính theo tổng xúc xắc.
 - **Đa hình Sự kiện & Vật phẩm**: `GameEventManager` gọi `event.onTrigger(room)` và `event.onExpire(room)` thống nhất cho mọi `GameEvent`; hệ thống vật phẩm gọi `item.canUse(...)` và `item.applyEffect(...)` thống nhất cho mọi `Item`.
 
 ### 1.4. Tính Đóng gói (Encapsulation)
@@ -42,8 +42,7 @@ OOP_BTL/
 ├── Monopoly/
 │   ├── src/
 │   │   ├── model/           # Domain Layer (GameRoom, Player, Board, Tile, Event, Item, Card)
-│   │   ├── engine/          # GameEngine (State Machine, TurnPhase, ActionResult, EngineEvent)
-│   │   ├── ai/              # BotController & BotStrategy
+│   │   ├── engine/          # GameEngine & engine/bot (BotController, BotStrategy, DefaultBotStrategy)
 │   │   └── server/          # REST API, WebSocket STOMP Broker, Services, Database (MySQL)
 │   ├── src/client/          # React Frontend (Vite)
 │   ├── test/                # FullSystemTestRunner & Test Suites

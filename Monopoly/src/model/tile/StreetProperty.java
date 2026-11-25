@@ -12,8 +12,8 @@ import model.GameRoom;
 public class StreetProperty extends PropertyTile {
     private final String colorGroup;
     private final int baseRent;
-    private int houseCount;
-    private boolean hasHotel;
+    private volatile int houseCount;
+    private volatile boolean hasHotel;
 
     public StreetProperty(int index, String name, int price, String colorGroup, int baseRent) {
         super(index, name, price);
@@ -45,6 +45,43 @@ public class StreetProperty extends PropertyTile {
 
     public int getBaseRent() {
         return this.baseRent;
+    }
+
+    public int getBuildingCost() {
+        if (this.colorGroup == null) {
+            return 100;
+        }
+        switch (this.colorGroup.toUpperCase()) {
+            case "BROWN":
+            case "LIGHT_BLUE":
+                return 50;
+            case "PINK":
+            case "ORANGE":
+                return 100;
+            case "RED":
+            case "YELLOW":
+                return 150;
+            case "GREEN":
+            case "DARK_BLUE":
+                return 200;
+            default:
+                return 100;
+        }
+    }
+
+    public boolean canUpgrade() {
+        return getOwner() != null && !isMortgaged() && !this.hasHotel;
+    }
+
+    public void upgradeBuilding() {
+        if (!canUpgrade()) {
+            return;
+        }
+        this.houseCount++;
+        if (this.houseCount >= 4) {
+            this.houseCount = 0;
+            this.hasHotel = true;
+        }
     }
 
     @Override

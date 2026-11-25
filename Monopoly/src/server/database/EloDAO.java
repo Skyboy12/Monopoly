@@ -5,7 +5,12 @@ import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.util.ArrayList;
+import java.util.Collections;
+import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Map;
+import java.util.Set;
 
 public class EloDAO {
     private static final int K_FACTOR = 32;
@@ -19,23 +24,48 @@ public class EloDAO {
         if (winnerId == loserId) {
             throw new IllegalArgumentException("Winner and loser must be different users");
         }
+        recordMultiplayerMatch(winnerId, List.of(loserId));
+    }
+
+    public void recordMultiplayerMatch(int winnerId, List<Integer> loserIds) throws SQLException {
+        if (loserIds == null || loserIds.isEmpty()) {
+            throw new IllegalArgumentException("At least one loser is required");
+        }
+        Set<Integer> uniqueLosers = new LinkedHashSet<>();
+        for (Integer loserId : loserIds) {
+            if (loserId == null || loserId == winnerId) {
+                throw new IllegalArgumentException("Winner and losers must be valid and distinct users");
+            }
+            uniqueLosers.add(loserId);
+        }
+
+        List<Integer> sortedIds = new ArrayList<>(1 + uniqueLosers.size());
+        sortedIds.add(winnerId);
+        sortedIds.addAll(uniqueLosers);
+        Collections.sort(sortedIds);
 
         try (Connection conn = Connector.getConnection()) {
             conn.setAutoCommit(false);
             try {
-                int winnerElo = getEloForUpdate(conn, winnerId);
-                int loserElo = getEloForUpdate(conn, loserId);
+                Map<Integer, Integer> eloById = getElosForUpdate(conn, sortedIds);
+                int winnerElo = eloById.get(winnerId);
+                int currentWinnerElo = winnerElo;
 
-                double expectedWin = expectedScore(winnerElo, loserElo);
-                double expectedLose = expectedScore(loserElo, winnerElo);
+                for (int loserId : uniqueLosers) {
+                    int loserElo = eloById.get(loserId);
+                    double expectedWin = expectedScore(winnerElo, loserElo);
+                    double expectedLose = expectedScore(loserElo, winnerElo);
 
-                int newWinnerElo = Math.max(MIN_ELO, (int) Math.round(winnerElo + K_FACTOR * (1.0 - expectedWin)));
-                int newLoserElo = Math.max(MIN_ELO, (int) Math.round(loserElo + K_FACTOR * (0.0 - expectedLose)));
+                    int winnerDelta = (int) Math.round(K_FACTOR * (1.0 - expectedWin));
+                    int nextWinnerElo = Math.max(MIN_ELO, currentWinnerElo + winnerDelta);
+                    int newLoserElo = Math.max(MIN_ELO, (int) Math.round(loserElo + K_FACTOR * (0.0 - expectedLose)));
 
-                updatePlayerStats(conn, winnerId, newWinnerElo, true);
-                updatePlayerStats(conn, loserId, newLoserElo, false);
-                insertMatchHistory(conn, winnerId, loserId, winnerElo, newWinnerElo, loserElo, newLoserElo);
+                    updatePlayerStats(conn, loserId, newLoserElo, false);
+                    insertMatchHistory(conn, winnerId, loserId, currentWinnerElo, nextWinnerElo, loserElo, newLoserElo);
+                    currentWinnerElo = nextWinnerElo;
+                }
 
+                updatePlayerStats(conn, winnerId, currentWinnerElo, true);
                 conn.commit();
             } catch (SQLException e) {
                 conn.rollback();
@@ -70,17 +100,30 @@ public class EloDAO {
         return leaderboard;
     }
 
-    private static int getEloForUpdate(Connection conn, int userId) throws SQLException {
-        String sql = "SELECT elo FROM users WHERE id = ? FOR UPDATE";
+    private static Map<Integer, Integer> getElosForUpdate(Connection conn, List<Integer> sortedIds) throws SQLException {
+        StringBuilder placeholders = new StringBuilder();
+        for (int i = 0; i < sortedIds.size(); i++) {
+            if (i > 0) placeholders.append(", ");
+            placeholders.append("?");
+        }
+        String sql = "SELECT id, elo FROM users WHERE id IN (" + placeholders + ") ORDER BY id ASC FOR UPDATE";
+        Map<Integer, Integer> result = new LinkedHashMap<>();
         try (PreparedStatement ps = conn.prepareStatement(sql)) {
-            ps.setInt(1, userId);
+            for (int i = 0; i < sortedIds.size(); i++) {
+                ps.setInt(i + 1, sortedIds.get(i));
+            }
             try (ResultSet rs = ps.executeQuery()) {
-                if (rs.next()) {
-                    return rs.getInt("elo");
+                while (rs.next()) {
+                    result.put(rs.getInt("id"), rs.getInt("elo"));
                 }
-                throw new SQLException("User not found: " + userId);
             }
         }
+        for (int id : sortedIds) {
+            if (!result.containsKey(id)) {
+                throw new SQLException("User not found: " + id);
+            }
+        }
+        return result;
     }
 
     private static void updatePlayerStats(Connection conn, int userId, int newElo, boolean won) throws SQLException {

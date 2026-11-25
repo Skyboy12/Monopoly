@@ -79,6 +79,19 @@ public class TurnTimerService {
             // 1. Hủy timer cũ của phòng.
             cancelTurnTimer(roomId);
 
+            if (player.isBot()) {
+                AtomicReference<ScheduledFuture<?>> reference = new AtomicReference<>();
+                ScheduledFuture<?> future = scheduler.schedule(
+                        () -> handleDedicatedBotTurn(roomId, playerId, turnId, engine, reference),
+                        1,
+                        TimeUnit.SECONDS
+                );
+                reference.set(future);
+                roomTimers.put(roomId, future);
+                roomDeadlines.put(roomId, System.currentTimeMillis() + 1000L);
+                return;
+            }
+
             /*
              * 2. Lên lịch timeout.
              * Dùng AtomicReference để kiểm tra timer này
@@ -217,22 +230,56 @@ public class TurnTimerService {
          * để người chơi thật vẫn có thể giành lại quyền.
          */
         if (timeoutAccepted) {
+            try {
+                BotController.processBotTurn(engine);
+            } catch (Throwable ignored) {
+            } finally {
+                engine.ensureBotTurnResolved(roomId, turnId);
+                if (room.getStatus() == RoomStatus.PLAYING) {
+                    startTurnTimer(
+                            roomId,
+                            room.getTurnId(),
+                            engine
+                    );
+                }
+            }
+        }
+    }
 
+    private void handleDedicatedBotTurn(
+            String roomId,
+            String playerId,
+            int turnId,
+            GameEngine engine,
+            AtomicReference<ScheduledFuture<?>> reference) {
+        GameRoom room = engine.getRoom();
+        synchronized (room) {
+            ScheduledFuture<?> future = reference.get();
+            if (roomTimers.get(roomId) != future) {
+                return;
+            }
+            Player currentPlayer = room.getCurrentPlayer();
+            if (room.getStatus() != RoomStatus.PLAYING
+                    || room.getTurnId() != turnId
+                    || currentPlayer == null
+                    || !currentPlayer.getId().equals(playerId)
+                    || !currentPlayer.isBot()) {
+                if (roomTimers.remove(roomId, future)) {
+                    roomDeadlines.remove(roomId);
+                }
+                return;
+            }
+            if (roomTimers.remove(roomId, future)) {
+                roomDeadlines.remove(roomId);
+            }
+        }
+        try {
             BotController.processBotTurn(engine);
-
-            /*
-             * Sau khi Bot hoàn thành lượt,
-             * tạo timer cho lượt tiếp theo.
-             *
-             * Nếu người chơi thật giành lại quyền,
-             * timer cũng được tạo lại cho lượt hiện tại.
-             */
+        } catch (Throwable ignored) {
+        } finally {
+            engine.ensureBotTurnResolved(roomId, turnId);
             if (room.getStatus() == RoomStatus.PLAYING) {
-                startTurnTimer(
-                        roomId,
-                        room.getTurnId(),
-                        engine
-                );
+                startTurnTimer(roomId, room.getTurnId(), engine);
             }
         }
     }

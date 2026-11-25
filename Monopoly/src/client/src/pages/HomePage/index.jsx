@@ -162,6 +162,16 @@ export default function HomePage() {
       setLobbyError('Vui lòng nhập mã phòng hợp lệ.')
       return
     }
+    const isAlreadyHost = rooms.some(
+      (r) => r.id === cleanId && currentUser.userId && r.hostId === currentUser.userId,
+    )
+    const isAlreadyActive = activeRoomId === cleanId
+    const canReenterDirectly = (code, msg) =>
+      code === 'ALREADY_IN_ROOM' ||
+      /ALREADY_IN_ROOM/i.test(msg) ||
+      ((code === 'ROOM_NOT_WAITING' || /ROOM_NOT_WAITING/i.test(msg)) &&
+        (isAlreadyHost || isAlreadyActive))
+
     setLobbyError('')
     setJoiningId(cleanId)
     try {
@@ -170,7 +180,13 @@ export default function HomePage() {
       })
       if (response.data?.type === 'ERROR') {
         const errPayload = parseGamePayload(response.data)
-        setLobbyError(errPayload.message || errPayload.error || 'Không thể tham gia phòng.')
+        const errCode = errPayload.code || response.data?.code || ''
+        const errMsg = errPayload.message || errPayload.error || 'Không thể tham gia phòng.'
+        if (canReenterDirectly(errCode, errMsg)) {
+          openGameRoom(cleanId)
+          return
+        }
+        setLobbyError(errMsg)
         return
       }
       const payload = parseGamePayload(response.data)
@@ -179,6 +195,14 @@ export default function HomePage() {
     } catch (error) {
       if (error.response?.status === 401) {
         navigate('/login', { replace: true })
+        return
+      }
+      const status = error.response?.status
+      const errData = parseGamePayload(error.response?.data)
+      const errCode = errData?.code || error.response?.data?.code || ''
+      const errMsg = String(errData?.message || errData?.error || '')
+      if (status === 409 || canReenterDirectly(errCode, errMsg)) {
+        openGameRoom(cleanId)
         return
       }
       setLobbyError(getApiError(error, 'Không thể tham gia phòng.'))
@@ -192,7 +216,8 @@ export default function HomePage() {
     joinRoom(roomCode)
   }
 
-  const filteredRooms = rooms.filter((room) => {
+  const openRooms = rooms.filter((room) => room.statusCode !== 'FINISHED')
+  const filteredRooms = openRooms.filter((room) => {
     if (activeTab === 'Đang chờ') return room.statusCode === 'WAITING'
     if (activeTab === 'Đang chơi') return room.statusCode === 'PLAYING'
     return true
@@ -230,7 +255,7 @@ export default function HomePage() {
             </div>
             <div>
               <span>PHÒNG MỞ</span>
-              <b>{rooms.length}</b>
+              <b>{openRooms.length}</b>
             </div>
           </div>
         </aside>
@@ -245,7 +270,7 @@ export default function HomePage() {
               <div className="quick-heading">
                 <span>
                   <span className="online-dot" />
-                  {rooms.length} phòng đang mở
+                  {openRooms.length} phòng đang mở
                 </span>
               </div>
               <button
@@ -349,7 +374,8 @@ export default function HomePage() {
               {filteredRooms.map((room, index) => {
                 const isFull = room.players >= room.maxPlayers
                 const isWaiting = room.statusCode === 'WAITING'
-                const isHostSelf = room.hostId === currentUser.userId
+                const isHostSelf = Boolean(currentUser.userId) && room.hostId === currentUser.userId
+                const isSelfInRoom = isHostSelf || activeRoomId === room.id
                 return (
                   <article className="room-card" key={room.id}>
                     <div className={`room-cover room-cover-${index % 3}`}>
@@ -389,16 +415,18 @@ export default function HomePage() {
                       <button
                         type="button"
                         className="join-btn room-card-button"
-                        disabled={isFull || !isWaiting || joiningId === room.id}
-                        onClick={() => joinRoom(room.id)}
+                        disabled={!isSelfInRoom && (isFull || !isWaiting || joiningId === room.id)}
+                        onClick={() => (isSelfInRoom ? openGameRoom(room.id) : joinRoom(room.id))}
                       >
                         {joiningId === room.id
                           ? 'Đang vào...'
-                          : !isWaiting
-                            ? room.statusLabel
-                            : isFull
-                              ? 'Đã đầy'
-                              : 'Vào phòng'}
+                          : isSelfInRoom
+                            ? 'Vào lại phòng'
+                            : !isWaiting
+                              ? room.statusLabel
+                              : isFull
+                                ? 'Đã đầy'
+                                : 'Vào phòng'}
                       </button>
                     </div>
                   </article>

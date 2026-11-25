@@ -102,6 +102,7 @@ public final class HttpRequestParser {
     }
 
     public static final class HttpParseException extends IOException {
+        private static final long serialVersionUID = 1L;
         private final int statusCode;
         private final String errorCode;
 

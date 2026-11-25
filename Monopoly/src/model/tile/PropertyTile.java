@@ -14,8 +14,8 @@ import model.Player;
  */
 public abstract class PropertyTile extends Tile {
     private final int price;
-    private Player owner;
-    private boolean mortgaged;
+    private volatile Player owner;
+    private volatile boolean mortgaged;
 
     public PropertyTile(int index, String name, int price) {
         super(index, name);
