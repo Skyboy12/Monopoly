@@ -16,7 +16,7 @@ public class ArrestWarrantItem extends Item {
                 "ARREST_WARRANT",
                 "Lệnh Bắt Khẩn cấp",
                 "Đưa thẳng một người chơi đang hoạt động vào tù ngay lập tức.",
-                ItemTriggerPhase.AWAITING_DECISION
+                ItemTriggerPhase.PRE_ROLL_OR_DECISION
         );
     }
 

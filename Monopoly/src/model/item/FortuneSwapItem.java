@@ -17,7 +17,7 @@ public class FortuneSwapItem extends Item {
                 "FORTUNE_SWAP",
                 "Gậy Đổi Vận",
                 "Hoán đổi vị trí trên bàn cờ với người chơi có tổng tài sản cao nhất.",
-                ItemTriggerPhase.AWAITING_DECISION
+                ItemTriggerPhase.PRE_ROLL_OR_DECISION
         );
     }
 

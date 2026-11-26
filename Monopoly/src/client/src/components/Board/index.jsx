@@ -59,6 +59,11 @@ export default function Board({
   rentMultiplier = 1,
   itemControls = null,
   itemFx = null,
+  highlightedPlayerId = null,
+  sellableTileIndices = [],
+  forcedDiceValue = null,
+  lastRollerName = '',
+  actionBanner = null,
 }) {
   const [visualPositions, setVisualPositions] = useState(() =>
     Object.fromEntries(players.map((p) => [p.id, p.position ?? 0])),
@@ -203,10 +208,12 @@ export default function Board({
   })
 
   const playerColorMap = new Map(players.map((player) => [player.id, player.color]))
+  const playerMap = new Map(players.map((player, idx) => [player.id, { ...player, seat: idx + 1 }]))
   const myPlayer = players.find((p) => p.id === myPlayerId) || null
   const isTargeting = Boolean(itemControls?.pendingItem)
   const targetableSet = new Set(itemControls?.targetableTileIndices || [])
   const upgradableSet = new Set(upgradableTileIndices || [])
+  const sellableSet = new Set(sellableTileIndices || [])
 
   const fxTileIndex = itemFx?.targetTileIndex ?? itemFx?.tileIndex ?? null
   const isShieldAuto = itemFx?.auto === true || itemFx?.auto === 'true'
@@ -239,7 +246,11 @@ export default function Board({
             const position = positionToGrid(tile.index)
             const playersHere = getPlayersAtTile(tile.index)
             const corner = CORNER_INDICES.has(tile.index)
-            const ownerColor = tile.ownerId ? playerColorMap.get(tile.ownerId) : null
+            const ownerInfo = tile.ownerId ? playerMap.get(tile.ownerId) : null
+            const ownerColor = ownerInfo?.color || (tile.ownerId ? playerColorMap.get(tile.ownerId) : null)
+            const ownerSeat = ownerInfo ? `P${ownerInfo.seat}` : null
+            const isHighlightedOwner = Boolean(highlightedPlayerId && tile.ownerId === highlightedPlayerId)
+            const isSellable = sellableSet.has(tile.index)
             const isStreet = tile.type === 'STREET' && tile.color
             const isActiveHere = playersHere.some((player) => player.id === currentPlayerId)
             const edgeSide =
@@ -256,6 +267,20 @@ export default function Board({
             const isChest = tile.type === 'COMMUNITY_CHEST'
             const houseCount = Number(tile.houseCount ?? 0)
             const hasHotel = Boolean(tile.hasHotel)
+            const rentTable = Array.isArray(tile.rentTable) ? tile.rentTable : []
+            let currentRent = 0
+            if (ownerInfo && !tile.mortgaged && !tile.frozen && rentTable.length > 0) {
+              if (tile.type === 'STREET') {
+                const idx = hasHotel ? 4 : Math.min(3, Math.max(0, houseCount))
+                currentRent = Number(rentTable[idx] ?? 0) * rentMultiplier
+              } else if (tile.type === 'RAILROAD') {
+                const ownedRr = mergedTiles.filter((t) => t.type === 'RAILROAD' && t.ownerId === ownerInfo.id).length
+                currentRent = Number(rentTable[Math.max(0, Math.min(3, ownedRr - 1))] ?? 0) * rentMultiplier
+              } else if (tile.type === 'UTILITY') {
+                const ownedUt = mergedTiles.filter((t) => t.type === 'UTILITY' && t.ownerId === ownerInfo.id).length
+                currentRent = Number(rentTable[Math.max(0, Math.min(1, ownedUt - 1))] ?? 0)
+              }
+            }
             const isTargetable = isTargeting && targetableSet.has(tile.index)
             const isTrail = Boolean(trailTiles[tile.index])
 
@@ -272,8 +297,12 @@ export default function Board({
 
             return (
               <div
-                className={`board-tile ${corner ? 'corner-tile' : ''} ${edgeClass} ${hasPawns ? 'has-pawns' : ''} ${tile.frozen ? 'tile-frozen' : ''} ${isActiveHere ? 'tile-active' : ''} ${isChance ? 'tile-chance' : ''} ${isChest ? 'tile-chest' : ''} ${isTrail ? 'tile-trail' : ''} ${isTargetable ? 'tile-targetable' : ''} ${tileFxClass}`}
-                style={{ gridRow: position.row, gridColumn: position.col }}
+                className={`board-tile ${corner ? 'corner-tile' : ''} ${edgeClass} ${hasPawns ? 'has-pawns' : ''} ${tile.frozen ? 'tile-frozen' : ''} ${isActiveHere ? 'tile-active' : ''} ${isChance ? 'tile-chance' : ''} ${isChest ? 'tile-chest' : ''} ${isTrail ? 'tile-trail' : ''} ${isTargetable ? 'tile-targetable' : ''} ${isHighlightedOwner ? 'tile-owner-highlight' : ''} ${isSellable ? 'tile-sellable' : ''} ${tileFxClass}`}
+                style={{
+                  gridRow: position.row,
+                  gridColumn: position.col,
+                  ...(ownerColor ? { boxShadow: `inset 0 0 0 2px ${ownerColor}` } : {}),
+                }}
                 key={tile.index}
                 role="button"
                 tabIndex={0}
@@ -294,7 +323,7 @@ export default function Board({
                     }
                   }
                 }}
-                title={`#${tile.index} ${tile.name}${tile.price > 0 ? ` (${formatMoney(tile.price)})` : ''}${hasHotel ? ' • Khách sạn' : houseCount > 0 ? ` • ${houseCount} nhà` : ''}`}
+                title={`#${tile.index} ${tile.name}${tile.price > 0 ? ` (${formatMoney(tile.price)})` : ''}${ownerInfo ? ` • Chủ: ${ownerInfo.name}` : ''}${currentRent > 0 ? ` • Thuê: ${formatMoney(currentRent)}` : ''}${hasHotel ? ' • Khách sạn' : houseCount > 0 ? ` • ${houseCount} nhà` : ''}`}
               >
                 {isStreet && (
                   <div
@@ -302,8 +331,10 @@ export default function Board({
                     style={{ background: tile.color }}
                   />
                 )}
-                {ownerColor && (
-                  <span className="tile-owner" style={{ background: ownerColor }} />
+                {ownerColor && ownerSeat && (
+                  <span className="tile-owner" style={{ background: ownerColor }}>
+                    {ownerSeat}
+                  </span>
                 )}
                 {hasHotel ? (
                   <span className="tile-building tile-hotel" title="Khách sạn">
@@ -385,6 +416,12 @@ export default function Board({
               </div>
             )}
 
+            {actionBanner && (
+              <div className={`action-fx-banner tone-${actionBanner.tone || 'info'}`} key={actionBanner.key} role="status">
+                <span>{actionBanner.text}</span>
+              </div>
+            )}
+
             <div className="center-brand">
               <Logo small />
             </div>
@@ -415,7 +452,13 @@ export default function Board({
                   <span>{d2}</span>
                 </div>
               </div>
-              <div className="dice-total">{totalText}</div>
+              <div className="dice-total">
+                {lastRollerName && dice ? `${lastRollerName}: ` : ''}
+                {totalText}
+              </div>
+              {forcedDiceValue != null && (
+                <div className="forced-dice-badge">Xúc xắc đã chọn: {forcedDiceValue}</div>
+              )}
             </div>
 
             <BoardItemBar itemControls={itemControls} />

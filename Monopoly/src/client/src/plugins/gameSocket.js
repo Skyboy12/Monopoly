@@ -37,6 +37,7 @@ export function createGameSocket({
       sendRoll: noopSender,
       sendBuy: noopSender,
       sendUpgrade: noopSender,
+      sendSell: noopSender,
       sendItem: noopSender,
       sendEndTurn: noopSender,
       sendPayBail: noopSender,
@@ -153,6 +154,8 @@ export function createGameSocket({
       send(`/app/room/${roomId}/buy-property`, { roomId, playerId: userId, turnId, tileIndex }),
     sendUpgrade: (turnId, tileIndex) =>
       send(`/app/room/${roomId}/upgrade-property`, { roomId, playerId: userId, turnId, tileIndex }),
+    sendSell: (turnId, tileIndex) =>
+      send(`/app/room/${roomId}/sell-property`, { roomId, playerId: userId, turnId, tileIndex }),
     sendItem: (turnId, itemId, context = {}) =>
       send(`/app/room/${roomId}/use-item`, { roomId, playerId: userId, turnId, itemId, context }),
     sendEndTurn: (turnId) =>

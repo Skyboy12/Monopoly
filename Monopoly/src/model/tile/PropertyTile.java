@@ -89,8 +89,12 @@ public abstract class PropertyTile extends Tile {
         if (rent > 0) {
             boolean success = player.pay(rent, this.owner);
             if (!success) {
-                // Người chơi không đủ tiền trả nợ -> Tuyên bố phá sản trước chủ nợ (owner)
-                player.declareBankruptcy(this.owner);
+                if (player.getMoney() + player.getLiquidationValue() >= rent) {
+                    player.registerDebt(rent, this.owner, false);
+                } else {
+                    // Người chơi không đủ tiền trả nợ -> Tuyên bố phá sản trước chủ nợ (owner)
+                    player.declareBankruptcy(this.owner);
+                }
             }
         }
     }

@@ -208,7 +208,17 @@ public class ApiGatewayServer {
             boolean isAutoShield = (type == GameEngine.EngineEvent.Type.ITEM_USED
                     && "true".equalsIgnoreCase(data.get("auto")));
             boolean isSpecialEvent = (type == GameEngine.EngineEvent.Type.SPECIAL_EVENT_TRIGGERED);
-            if (WebSocketStompBroker.isDirectCommandInProgress() && !isAutoShield && !isSpecialEvent) {
+            boolean isAlwaysBroadcastEvent = (type == GameEngine.EngineEvent.Type.DEBT_PENDING
+                    || type == GameEngine.EngineEvent.Type.PROPERTY_SOLD
+                    || type == GameEngine.EngineEvent.Type.DEBT_SETTLED
+                    || type == GameEngine.EngineEvent.Type.PLAYER_BANKRUPT
+                    || type == GameEngine.EngineEvent.Type.RENT_PAID
+                    || type == GameEngine.EngineEvent.Type.TAX_PAID
+                    || type == GameEngine.EngineEvent.Type.CARD_DRAWN);
+            if (WebSocketStompBroker.isDirectCommandInProgress()
+                    && !isAutoShield
+                    && !isSpecialEvent
+                    && !isAlwaysBroadcastEvent) {
                 return;
             }
             if (type != GameEngine.EngineEvent.Type.TURN_TIMED_OUT
@@ -221,7 +231,8 @@ public class ApiGatewayServer {
                     && type != GameEngine.EngineEvent.Type.SPECIAL_EVENT_TRIGGERED
                     && type != GameEngine.EngineEvent.Type.EXTRA_ROLL_GRANTED
                     && type != GameEngine.EngineEvent.Type.TURN_ENDED
-                    && type != GameEngine.EngineEvent.Type.GAME_FINISHED) {
+                    && type != GameEngine.EngineEvent.Type.GAME_FINISHED
+                    && !isAlwaysBroadcastEvent) {
                 return;
             }
 
@@ -321,8 +332,10 @@ public class ApiGatewayServer {
                         stompBroker.broadcastToRoom(roomId, new GameMessage(
                                 "DICE_ROLLED", playerId, roomId, turnId, payload
                         ));
+                        stompBroker.broadcastRoomSnapshot(roomId);
                     }
                     case PROPERTY_BOUGHT -> {
+                        int tileIndex = parseIntSafe(data.get("tileIndex"), -1);
                         String tileName = data.getOrDefault("tile", "");
                         int price = parseIntSafe(data.get("price"), 0);
                         roomManagerService.appendRoomLog(
@@ -330,13 +343,125 @@ public class ApiGatewayServer {
                                 String.format(Locale.US, "[Bot] %s đã mua %s với giá $%,d.", actorName, tileName, price)
                         );
                         String payload = String.format(
-                                "{\"bot\":true,\"ownerId\":\"%s\",\"tileName\":\"%s\",\"price\":%d}",
+                                "{\"bot\":true,\"ownerId\":\"%s\",\"tileIndex\":%d,\"tileName\":\"%s\",\"price\":%d}",
                                 SimpleJson.escape(playerId),
+                                tileIndex,
                                 SimpleJson.escape(tileName),
                                 price
                         );
                         stompBroker.broadcastToRoom(roomId, new GameMessage(
                                 "PROPERTY_BOUGHT", playerId, roomId, turnId, payload
+                        ));
+                        stompBroker.broadcastRoomSnapshot(roomId);
+                    }
+                    case DEBT_PENDING -> {
+                        int amount = parseIntSafe(data.get("amount"), 0);
+                        String creditorId = data.getOrDefault("creditorId", "");
+                        int liquidationValue = parseIntSafe(data.get("liquidationValue"), 0);
+                        roomManagerService.appendRoomLog(
+                                roomId,
+                                String.format(Locale.US, "%s đang nợ $%,d và cần bán tài sản để thanh toán.", actorName, amount)
+                        );
+                        String creditorJson = creditorId.isEmpty() ? "null" : ("\"" + SimpleJson.escape(creditorId) + "\"");
+                        String payload = String.format(
+                                "{\"playerId\":\"%s\",\"amount\":%d,\"creditorId\":%s,\"liquidationValue\":%d}",
+                                SimpleJson.escape(playerId), amount, creditorJson, liquidationValue
+                        );
+                        stompBroker.broadcastToRoom(roomId, new GameMessage(
+                                "DEBT_PENDING", playerId, roomId, turnId, payload
+                        ));
+                    }
+                    case PROPERTY_SOLD -> {
+                        int tileIndex = parseIntSafe(data.get("tileIndex"), -1);
+                        String tileName = data.getOrDefault("tileName", "");
+                        int refund = parseIntSafe(data.get("refund"), 0);
+                        int remainingDebt = parseIntSafe(data.get("remainingDebt"), 0);
+                        roomManagerService.appendRoomLog(
+                                roomId,
+                                String.format(Locale.US, "%s đã bán %s thu về $%,d.", actorName, tileName, refund)
+                        );
+                        String payload = String.format(
+                                "{\"sellerId\":\"%s\",\"tileIndex\":%d,\"tileName\":\"%s\",\"refund\":%d,\"remainingDebt\":%d}",
+                                SimpleJson.escape(playerId), tileIndex, SimpleJson.escape(tileName), refund, remainingDebt
+                        );
+                        stompBroker.broadcastToRoom(roomId, new GameMessage(
+                                "PROPERTY_SOLD", playerId, roomId, turnId, payload
+                        ));
+                    }
+                    case DEBT_SETTLED -> {
+                        roomManagerService.appendRoomLog(
+                                roomId,
+                                String.format(Locale.US, "%s đã thanh toán xong khoản nợ.", actorName)
+                        );
+                        String payload = String.format(
+                                "{\"playerId\":\"%s\"}",
+                                SimpleJson.escape(playerId)
+                        );
+                        stompBroker.broadcastToRoom(roomId, new GameMessage(
+                                "DEBT_SETTLED", playerId, roomId, turnId, payload
+                        ));
+                    }
+                    case PLAYER_BANKRUPT -> {
+                        String creditorId = data.getOrDefault("creditorId", "");
+                        roomManagerService.appendRoomLog(
+                                roomId,
+                                String.format(Locale.US, "%s đã phá sản!", actorName)
+                        );
+                        String creditorJson = creditorId.isEmpty() ? "null" : ("\"" + SimpleJson.escape(creditorId) + "\"");
+                        String payload = String.format(
+                                "{\"playerId\":\"%s\",\"creditorId\":%s}",
+                                SimpleJson.escape(playerId), creditorJson
+                        );
+                        stompBroker.broadcastToRoom(roomId, new GameMessage(
+                                "PLAYER_BANKRUPT", playerId, roomId, turnId, payload
+                        ));
+                    }
+                    case RENT_PAID -> {
+                        int amount = parseIntSafe(data.get("amount"), 0);
+                        String ownerId = data.getOrDefault("ownerId", "");
+                        String tileName = data.getOrDefault("tileName", "");
+                        String ownerName = ownerId.isEmpty() ? "chủ đất" : resolveRoomPlayerName(room, ownerId);
+                        roomManagerService.appendRoomLog(
+                                roomId,
+                                String.format(Locale.US, "%s trả $%,d tiền thuê %s cho %s.",
+                                        actorName, amount, tileName, ownerName)
+                        );
+                        String payload = String.format(
+                                "{\"payerId\":\"%s\",\"ownerId\":\"%s\",\"tileName\":\"%s\",\"amount\":%d}",
+                                SimpleJson.escape(playerId), SimpleJson.escape(ownerId), SimpleJson.escape(tileName), amount
+                        );
+                        stompBroker.broadcastToRoom(roomId, new GameMessage(
+                                "RENT_PAID", playerId, roomId, turnId, payload
+                        ));
+                    }
+                    case TAX_PAID -> {
+                        int amount = parseIntSafe(data.get("amount"), 0);
+                        String tileName = data.getOrDefault("tileName", "thuế");
+                        roomManagerService.appendRoomLog(
+                                roomId,
+                                String.format(Locale.US, "%s nộp $%,d tiền %s.", actorName, amount, tileName)
+                        );
+                        String payload = String.format(
+                                "{\"playerId\":\"%s\",\"tileName\":\"%s\",\"amount\":%d}",
+                                SimpleJson.escape(playerId), SimpleJson.escape(tileName), amount
+                        );
+                        stompBroker.broadcastToRoom(roomId, new GameMessage(
+                                "TAX_PAID", playerId, roomId, turnId, payload
+                        ));
+                    }
+                    case CARD_DRAWN -> {
+                        String cardTitle = data.getOrDefault("title", data.getOrDefault("cardTitle", "Thẻ sự kiện"));
+                        String description = data.getOrDefault("description", "");
+                        roomManagerService.appendRoomLog(
+                                roomId,
+                                String.format(Locale.US, "%s rút thẻ: %s", actorName, cardTitle)
+                        );
+                        String payload = String.format(
+                                "{\"playerId\":\"%s\",\"title\":\"%s\",\"description\":\"%s\"}",
+                                SimpleJson.escape(playerId), SimpleJson.escape(cardTitle), SimpleJson.escape(description)
+                        );
+                        stompBroker.broadcastToRoom(roomId, new GameMessage(
+                                "CARD_DRAWN", playerId, roomId, turnId, payload
                         ));
                     }
                     case PROPERTY_UPGRADED -> {

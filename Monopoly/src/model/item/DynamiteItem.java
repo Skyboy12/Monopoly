@@ -16,7 +16,7 @@ public class DynamiteItem extends Item {
                 "DYNAMITE",
                 "Thùng Thuốc nổ",
                 "Phá hủy toàn bộ nhà và khách sạn trên một ô đất chỉ định.",
-                ItemTriggerPhase.AWAITING_DECISION
+                ItemTriggerPhase.PRE_ROLL_OR_DECISION
         );
     }
 

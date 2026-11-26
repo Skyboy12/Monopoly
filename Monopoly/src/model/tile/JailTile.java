@@ -35,8 +35,12 @@ public class JailTile extends Tile {
         if (player.getTurnsInJail() >= 3) {
             boolean paid = player.payBail();
             if (!paid) {
-                // Không đủ $50 bảo lãnh sau 3 lượt -> Phá sản trước ngân hàng
-                player.declareBankruptcy(null);
+                if (player.getMoney() + player.getLiquidationValue() >= Player.BAIL_AMOUNT) {
+                    player.registerDebt(Player.BAIL_AMOUNT, null, true);
+                } else {
+                    // Không đủ $50 bảo lãnh sau 3 lượt -> Phá sản trước ngân hàng
+                    player.declareBankruptcy(null);
+                }
             }
         }
     }

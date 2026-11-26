@@ -667,6 +667,10 @@ public final class WebSocketStompBroker {
                         int tileIndex = SimpleJson.getInt(bodyMap, "tileIndex", -1);
                         yield wsController.handleUpgradeProperty(roomId, userId, turnId, tileIndex, engine);
                     }
+                    case "sell-property" -> {
+                        int tileIndex = SimpleJson.getInt(bodyMap, "tileIndex", -1);
+                        yield wsController.handleSellProperty(roomId, userId, turnId, tileIndex, engine);
+                    }
                     default -> new GameMessage(
                             "ERROR", userId, roomId, turnId,
                             "{\"error\":\"UNKNOWN_ACTION\",\"message\":\"Hành động STOMP không được hỗ trợ.\"}"
@@ -735,6 +739,19 @@ public final class WebSocketStompBroker {
                                 actorName,
                                 tileName != null ? tileName : "tài sản",
                                 price)
+                );
+            }
+            case "PROPERTY_SOLD" -> {
+                String sellerId = SimpleJson.getString(payloadMap, "sellerId");
+                String actorName = resolvePlayerName(roomId, sellerId != null ? sellerId : result.getSenderId());
+                String tileName = SimpleJson.getString(payloadMap, "tileName");
+                int refund = SimpleJson.getInt(payloadMap, "refund", 0);
+                roomManagerService.appendRoomLog(
+                        roomId,
+                        String.format(Locale.US, "%s đã bán %s thu về $%,d.",
+                                actorName,
+                                tileName != null ? tileName : "tài sản",
+                                refund)
                 );
             }
             case "PROPERTY_UPGRADED" -> {

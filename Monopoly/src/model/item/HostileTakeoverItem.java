@@ -17,7 +17,7 @@ public class HostileTakeoverItem extends Item {
                 "HOSTILE_TAKEOVER",
                 "Cưỡng chế Thu mua",
                 "Trả tiền niêm yết để mua đứt 1 ô đất bất kỳ của đối thủ.",
-                ItemTriggerPhase.AWAITING_DECISION
+                ItemTriggerPhase.PRE_ROLL_OR_DECISION
         );
     }
 

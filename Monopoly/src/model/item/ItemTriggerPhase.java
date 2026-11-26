@@ -10,6 +10,7 @@ package model.item;
 public enum ItemTriggerPhase {
     PRE_ROLL,
     ON_LAND,
-    AWAITING_DECISION
+    AWAITING_DECISION,
+    PRE_ROLL_OR_DECISION
 }
 

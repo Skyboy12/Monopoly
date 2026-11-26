@@ -17,6 +17,21 @@ import model.tile.Tile;
  */
 public class DefaultBotStrategy implements BotStrategy {
 
+    private final long botStepDelayMs = Long.getLong("monopoly.botStepDelayMs", 1200L);
+
+    private boolean sleepQuietly(long ms) {
+        if (ms <= 0) {
+            return true;
+        }
+        try {
+            Thread.sleep(ms);
+            return true;
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            return false;
+        }
+    }
+
     @Override
     public void playTurn(GameEngine engine, Player initialPlayer) {
         if (engine == null || initialPlayer == null) {
@@ -48,6 +63,9 @@ public class DefaultBotStrategy implements BotStrategy {
                 }
 
                 if (phase == TurnPhase.AWAITING_ROLL) {
+                    if (!sleepQuietly(botStepDelayMs)) {
+                        return;
+                    }
                     if (player.getStatus() == PlayerStatus.IN_JAIL) {
                         if (player.getMoney() >= 3L * Player.BAIL_AMOUNT) {
                             if (!engine.payBail(playerId, turnId)) {
@@ -60,12 +78,28 @@ public class DefaultBotStrategy implements BotStrategy {
                                 engine.endTurn(playerId, turnId);
                                 return;
                             }
+                            int diceTotal = room.getLastDice() != null ? room.getLastDice().getTotal() : 0;
+                            if (!sleepQuietly(botStepDelayMs + diceTotal * 110L)) {
+                                return;
+                            }
                             continue;
                         }
                     }
 
                     if (!engine.rollDice(playerId, turnId)) {
                         engine.endTurn(playerId, turnId);
+                        return;
+                    }
+                    int diceTotal = room.getLastDice() != null ? room.getLastDice().getTotal() : 0;
+                    if (!sleepQuietly(botStepDelayMs + diceTotal * 110L)) {
+                        return;
+                    }
+                    continue;
+                }
+
+                if (phase == TurnPhase.AWAITING_DEBT_SETTLEMENT) {
+                    engine.autoSettleDebt(playerId, turnId);
+                    if (!sleepQuietly(botStepDelayMs)) {
                         return;
                     }
                     continue;
@@ -76,21 +110,32 @@ public class DefaultBotStrategy implements BotStrategy {
                     if (currentTile instanceof PropertyTile) {
                         PropertyTile property = (PropertyTile) currentTile;
                         if (!property.hasOwner() && player.getMoney() >= 3L * property.getPrice()) {
-                            engine.buyProperty(playerId, turnId);
-                        }
-                    }
-
-                    for (PropertyTile owned : player.getOwnedProperties()) {
-                        if (owned instanceof StreetProperty) {
-                            StreetProperty street = (StreetProperty) owned;
-                            if (street.canUpgrade() && player.getMoney() >= 4L * street.getBuildingCost()) {
-                                if (engine.upgradeProperty(playerId, turnId, street.getIndex())) {
-                                    break;
+                            if (engine.buyProperty(playerId, turnId)) {
+                                if (!sleepQuietly(botStepDelayMs)) {
+                                    return;
                                 }
                             }
                         }
                     }
 
+                    int upgradeTileIndex = engine.getUpgradeableTileIndex();
+                    if (upgradeTileIndex >= 0) {
+                        Tile upgradeTile = room.getBoard().getTile(upgradeTileIndex);
+                        if (upgradeTile instanceof StreetProperty) {
+                            StreetProperty street = (StreetProperty) upgradeTile;
+                            if (player.getMoney() >= 4L * street.getBuildingCost()) {
+                                if (engine.upgradeProperty(playerId, turnId, street.getIndex())) {
+                                    if (!sleepQuietly(botStepDelayMs)) {
+                                        return;
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    if (!sleepQuietly(botStepDelayMs)) {
+                        return;
+                    }
                     if (!engine.endTurn(playerId, turnId)) {
                         return;
                     }

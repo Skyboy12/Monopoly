@@ -1,4 +1,4 @@
-export const PLAYER_COLORS = ['#f43f5e', '#3b82f6', '#10b981', '#f59e0b']
+export const PLAYER_COLORS = ['#7c3aed', '#0891b2', '#0f172a', '#84cc16']
 
 export const PURCHASABLE_TYPES = new Set(['STREET', 'RAILROAD', 'UTILITY'])
 

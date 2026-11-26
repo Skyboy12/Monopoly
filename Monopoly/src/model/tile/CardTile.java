@@ -34,6 +34,7 @@ public class CardTile extends Tile {
     );
 
     private final DeckType deckType;
+    private volatile Card lastDrawnCard;
 
     public CardTile(int index, String name, DeckType deckType) {
         super(index, name);
@@ -44,6 +45,10 @@ public class CardTile extends Tile {
         return deckType;
     }
 
+    public Card getLastDrawnCard() {
+        return lastDrawnCard;
+    }
+
     @Override
     public void onLand(Player player, GameRoom room) {
         if (player == null || isFrozen()) {
@@ -51,6 +56,7 @@ public class CardTile extends Tile {
         }
         List<Card> deck = (deckType == DeckType.CHANCE) ? CHANCE_DECK : COMMUNITY_CHEST_DECK;
         Card drawn = deck.get(RANDOM.nextInt(deck.size()));
+        this.lastDrawnCard = drawn;
         drawn.apply(player, room);
     }
 }

@@ -38,6 +38,9 @@ public class GameEngine {
 
     private int consecutiveDoubles;
     private boolean swappedPositionThisTurn = false;
+    private int landedTileIndex = -1;
+    private int landedHouseCount = 0;
+    private boolean upgradedThisTurn = false;
 
     // Thông tin khi Bot tiếp quản do timeout.
     private boolean botControlActive;
@@ -66,6 +69,43 @@ public class GameEngine {
     }
 
     // ================= GETTER =================
+
+    public synchronized boolean isUpgradedThisTurn() {
+        synchronized (room) {
+            return upgradedThisTurn;
+        }
+    }
+
+    public synchronized int getUpgradeableTileIndex() {
+        synchronized (room) {
+            if (getActionPhase() != TurnPhase.AWAITING_DECISION) {
+                return -1;
+            }
+            Player player = room.getCurrentPlayer();
+            if (player == null || player.getStatus() != PlayerStatus.ACTIVE) {
+                return -1;
+            }
+            if (swappedPositionThisTurn || upgradedThisTurn) {
+                return -1;
+            }
+            int pos = player.getPosition();
+            if (pos != landedTileIndex) {
+                return -1;
+            }
+            Tile tile = room.getBoard().getTile(pos);
+            if (!(tile instanceof StreetProperty)) {
+                return -1;
+            }
+            StreetProperty street = (StreetProperty) tile;
+            if (street.getOwner() != player || street.isMortgaged() || street.isHasHotel()) {
+                return -1;
+            }
+            if (street.getHouseCount() == 3 && landedHouseCount != 3) {
+                return -1;
+            }
+            return pos;
+        }
+    }
 
     public synchronized TurnPhase getCurrentPhase() {
         synchronized (room) {
@@ -385,7 +425,17 @@ public class GameEngine {
                 if (jailTile != null) {
                     jailTile.onLand(player, room);
                 }
+                if (player.hasPendingDebt()) {
+                    setActionPhase(TurnPhase.AWAITING_DEBT_SETTLEMENT);
+                    emitDebtPending(player, turnId);
+                    return result(true, "ROLL_DICE", actionId,
+                            "DEBT_PENDING", "Người chơi cần bán tài sản để trả nợ.",
+                            playerId, turnId);
+                }
                 if (player.getStatus() != PlayerStatus.ACTIVE) {
+                    if (player.getStatus() == PlayerStatus.BANKRUPT) {
+                        emit(EngineEvent.Type.PLAYER_BANKRUPT, player, turnId, Map.of("creditorId", ""));
+                    }
                     if (checkGameFinished()) {
                         return result(true, "ROLL_DICE", actionId,
                                 "GAME_FINISHED", "Ván chơi đã kết thúc.",
@@ -463,6 +513,11 @@ public class GameEngine {
                     consecutiveDoubles = 0;
                 }
 
+                landedTileIndex = tile.getIndex();
+                landedHouseCount = (tile instanceof StreetProperty)
+                        ? ((StreetProperty) tile).getHouseCount()
+                        : 0;
+
                 emit(
                         EngineEvent.Type.TILE_RESOLVED,
                         player,
@@ -491,6 +546,14 @@ public class GameEngine {
             }
         }
 
+        if (player.hasPendingDebt()) {
+            setActionPhase(TurnPhase.AWAITING_DEBT_SETTLEMENT);
+            emitDebtPending(player, turnId);
+            return result(true, "ROLL_DICE", actionId,
+                    "DEBT_PENDING", "Người chơi cần bán tài sản để trả nợ.",
+                    playerId, turnId);
+        }
+
         if (checkGameFinished()) {
             return result(true, "ROLL_DICE", actionId,
                     "GAME_FINISHED", "Ván chơi đã kết thúc.",
@@ -499,6 +562,11 @@ public class GameEngine {
 
         // Người chơi phá sản thì tự động chuyển lượt.
         if (player.getStatus() == PlayerStatus.BANKRUPT) {
+            String creditorId = "";
+            if (tile instanceof PropertyTile && ((PropertyTile) tile).getOwner() != null) {
+                creditorId = ((PropertyTile) tile).getOwner().getId();
+            }
+            emit(EngineEvent.Type.PLAYER_BANKRUPT, player, turnId, Map.of("creditorId", creditorId));
             advanceTurn(player, turnId);
 
             return result(true, "ROLL_DICE", actionId,
@@ -784,7 +852,9 @@ public class GameEngine {
             boolean validPhase = (item.getTriggerPhase() == ItemTriggerPhase.PRE_ROLL
                     && phase == TurnPhase.AWAITING_ROLL)
                     || (item.getTriggerPhase() == ItemTriggerPhase.AWAITING_DECISION
-                    && phase == TurnPhase.AWAITING_DECISION);
+                    && phase == TurnPhase.AWAITING_DECISION)
+                    || (item.getTriggerPhase() == ItemTriggerPhase.PRE_ROLL_OR_DECISION
+                    && (phase == TurnPhase.AWAITING_ROLL || phase == TurnPhase.AWAITING_DECISION));
             if (!validPhase) {
                 return save(result(false, "USE_ITEM", actionId,
                         "INVALID_PHASE", "Không thể dùng vật phẩm ở giai đoạn hiện tại.",
@@ -896,6 +966,20 @@ public class GameEngine {
                         playerId, turnId));
             }
 
+            if (upgradedThisTurn) {
+                return save(result(false, "UPGRADE_PROPERTY", actionId,
+                        "ALREADY_UPGRADED_THIS_TURN", "Mỗi lượt chỉ được nâng cấp tối đa 1 lần.",
+                        playerId, turnId));
+            }
+
+            if (swappedPositionThisTurn
+                    || tileIndex != player.getPosition()
+                    || tileIndex != landedTileIndex) {
+                return save(result(false, "UPGRADE_PROPERTY", actionId,
+                        "NOT_ON_TILE", "Chỉ có thể nâng cấp ô đất mà bạn vừa đáp xuống.",
+                        playerId, turnId));
+            }
+
             Tile tile = room.getBoard().getTile(tileIndex);
             if (!(tile instanceof StreetProperty)) {
                 return save(result(false, "UPGRADE_PROPERTY", actionId,
@@ -910,9 +994,21 @@ public class GameEngine {
                         playerId, turnId));
             }
 
-            if (!street.canUpgrade()) {
+            if (street.isHasHotel()) {
                 return save(result(false, "UPGRADE_PROPERTY", actionId,
-                        "CANNOT_UPGRADE", "Ô đất không thể nâng cấp thêm.",
+                        "MAX_LEVEL", "Ô đất đã đạt cấp độ tối đa (Khách sạn).",
+                        playerId, turnId));
+            }
+
+            if (street.isMortgaged()) {
+                return save(result(false, "UPGRADE_PROPERTY", actionId,
+                        "CANNOT_UPGRADE", "Ô đất đang thế chấp, không thể nâng cấp.",
+                        playerId, turnId));
+            }
+
+            if (street.getHouseCount() == 3 && landedHouseCount != 3) {
+                return save(result(false, "UPGRADE_PROPERTY", actionId,
+                        "HOTEL_REQUIRES_REVISIT", "Cần quay lại ô đất này ở lượt sau để nâng cấp lên Khách sạn.",
                         playerId, turnId));
             }
 
@@ -928,6 +1024,7 @@ public class GameEngine {
             }
 
             street.upgradeBuilding();
+            upgradedThisTurn = true;
 
             emit(
                     EngineEvent.Type.PROPERTY_UPGRADED,
@@ -1121,6 +1218,16 @@ public class GameEngine {
             if (jailTile != null) {
                 jailTile.onLand(player, room);
             }
+            if (player.hasPendingDebt()) {
+                setActionPhase(TurnPhase.AWAITING_DEBT_SETTLEMENT);
+                emitDebtPending(player, turnId);
+                return result(true, "END_TURN", actionId,
+                        "DEBT_PENDING", "Người chơi cần bán tài sản để trả nợ.",
+                        playerId, turnId);
+            }
+            if (player.getStatus() == PlayerStatus.BANKRUPT) {
+                emit(EngineEvent.Type.PLAYER_BANKRUPT, player, turnId, Map.of("creditorId", ""));
+            }
             if (checkGameFinished()) {
                 return result(true, "END_TURN", actionId,
                         "GAME_FINISHED", "Ván chơi đã kết thúc.",
@@ -1179,6 +1286,9 @@ public class GameEngine {
 
         consecutiveDoubles = 0;
         swappedPositionThisTurn = false;
+        landedTileIndex = -1;
+        landedHouseCount = 0;
+        upgradedThisTurn = false;
         room.setLastDice(null);
         currentPhase = TurnPhase.AWAITING_ROLL;
 
@@ -1225,6 +1335,136 @@ public class GameEngine {
     /**
      * Được TurnTimerService gọi khi hết giờ.
      */
+    private void emitDebtPending(Player player, int turnId) {
+        Player creditor = player.getPendingCreditor();
+        Map<String, String> data = new HashMap<>();
+        data.put("amount", String.valueOf(player.getPendingDebt()));
+        data.put("creditorId", creditor == null ? "" : creditor.getId());
+        data.put("liquidationValue", String.valueOf(player.getLiquidationValue()));
+        emit(EngineEvent.Type.DEBT_PENDING, player, turnId, data);
+    }
+
+    private int computePropertyRefund(PropertyTile p) {
+        int buildingValue = 0;
+        if (p instanceof StreetProperty) {
+            StreetProperty sp = (StreetProperty) p;
+            int cost = sp.getBuildingCost();
+            buildingValue = sp.isHasHotel() ? 5 * cost : sp.getHouseCount() * cost;
+        }
+        return (p.getPrice() + buildingValue) / 2;
+    }
+
+    public synchronized boolean sellProperty(String playerId, int turnId, int tileIndex) {
+        return sellPropertyInternal(room.getId(), playerId, turnId, tileIndex, newId()).isSuccess();
+    }
+
+    public synchronized ActionResult sellProperty(
+            String roomId, String playerId, int turnId, int tileIndex, String actionId) {
+        return sellPropertyInternal(roomId, playerId, turnId, tileIndex, actionId);
+    }
+
+    private ActionResult sellPropertyInternal(
+            String roomId, String playerId, int turnId, int tileIndex, String actionId) {
+        synchronized (room) {
+            ActionResult old = findDuplicate("SELL_PROPERTY", roomId, playerId, turnId, actionId);
+            if (old != null) {
+                return old;
+            }
+            ActionResult invalid = validateBase(roomId, playerId, turnId, "SELL_PROPERTY", actionId);
+            if (invalid != null) {
+                return save(invalid);
+            }
+            if (getActionPhase() != TurnPhase.AWAITING_DEBT_SETTLEMENT) {
+                return save(result(false, "SELL_PROPERTY", actionId,
+                        "INVALID_PHASE", "Chỉ có thể bán tài sản khi đang trả nợ.",
+                        playerId, turnId));
+            }
+            Tile tile = room.getBoard().getTile(tileIndex);
+            if (!(tile instanceof PropertyTile)) {
+                return save(result(false, "SELL_PROPERTY", actionId,
+                        "INVALID_TILE", "Ô cờ không phải tài sản có thể bán.",
+                        playerId, turnId));
+            }
+            Player player = room.getCurrentPlayer();
+            PropertyTile property = (PropertyTile) tile;
+            if (property.getOwner() != player) {
+                return save(result(false, "SELL_PROPERTY", actionId,
+                        "NOT_OWNER", "Bạn không sở hữu tài sản này.",
+                        playerId, turnId));
+            }
+
+            int refund = computePropertyRefund(property);
+            if (property instanceof StreetProperty) {
+                StreetProperty sp = (StreetProperty) property;
+                sp.setHouseCount(0);
+                sp.setHasHotel(false);
+            }
+            property.setMortgaged(false);
+            player.transferProperty(property, null);
+            player.addMoney(refund);
+
+            int remainingDebt = Math.max(0, player.getPendingDebt() - player.getMoney());
+            Map<String, String> soldData = new HashMap<>();
+            soldData.put("tileIndex", String.valueOf(tileIndex));
+            soldData.put("tileName", property.getName());
+            soldData.put("refund", String.valueOf(refund));
+            soldData.put("remainingDebt", String.valueOf(remainingDebt));
+            emit(EngineEvent.Type.PROPERTY_SOLD, player, turnId, soldData);
+
+            if (player.getMoney() >= player.getPendingDebt()) {
+                int debt = player.getPendingDebt();
+                Player creditor = player.getPendingCreditor();
+                boolean isBail = player.isPendingDebtIsBail();
+                if (creditor != null) {
+                    player.pay(debt, creditor);
+                } else {
+                    player.deductMoney(debt);
+                }
+                player.clearDebt();
+                if (isBail) {
+                    player.setStatus(PlayerStatus.ACTIVE);
+                    player.setTurnsInJail(0);
+                }
+                Map<String, String> settledData = new HashMap<>();
+                settledData.put("amount", String.valueOf(debt));
+                settledData.put("creditorId", creditor == null ? "" : creditor.getId());
+                emit(EngineEvent.Type.DEBT_SETTLED, player, turnId, settledData);
+                setActionPhase(TurnPhase.AWAITING_DECISION);
+            }
+
+            return save(result(true, "SELL_PROPERTY", actionId,
+                    "OK", "Đã bán tài sản.",
+                    playerId, turnId));
+        }
+    }
+
+    public synchronized ActionResult autoSettleDebt(String playerId, int turnId) {
+        synchronized (room) {
+            if (getActionPhase() != TurnPhase.AWAITING_DEBT_SETTLEMENT) {
+                return result(false, "AUTO_SETTLE_DEBT", newId(),
+                        "INVALID_PHASE", "Không ở phase trả nợ.",
+                        playerId, turnId);
+            }
+            Player player = room.getCurrentPlayer();
+            if (player == null || !same(player.getId(), playerId)) {
+                return result(false, "AUTO_SETTLE_DEBT", newId(),
+                        "NOT_YOUR_TURN", "Không phải lượt của người chơi.",
+                        playerId, turnId);
+            }
+            java.util.List<PropertyTile> props = new java.util.ArrayList<>(player.getOwnedProperties());
+            props.sort(java.util.Comparator.comparingInt(this::computePropertyRefund));
+            for (PropertyTile p : props) {
+                if (!player.hasPendingDebt() || getActionPhase() != TurnPhase.AWAITING_DEBT_SETTLEMENT) {
+                    break;
+                }
+                sellPropertyInternal(room.getId(), playerId, turnId, p.getIndex(), newId());
+            }
+            return result(true, "AUTO_SETTLE_DEBT", newId(),
+                    "OK", "Đã tự động bán tài sản trả nợ.",
+                    playerId, turnId);
+        }
+    }
+
     public synchronized ActionResult handleTimeout(
             String roomId, String playerId, int turnId,
             String actionId) {
@@ -1259,7 +1499,8 @@ public class GameEngine {
             }
 
             if (currentPhase != TurnPhase.AWAITING_ROLL
-                    && currentPhase != TurnPhase.AWAITING_DECISION) {
+                    && currentPhase != TurnPhase.AWAITING_DECISION
+                    && currentPhase != TurnPhase.AWAITING_DEBT_SETTLEMENT) {
 
                 return save(result(false, "TIMEOUT",
                         actionId, "INVALID_PHASE",
@@ -1531,7 +1772,10 @@ public class GameEngine {
     private void landWithAutoShieldTracking(Player player, Tile tile, int turnId) {
         int shieldsBefore = countRentShields(player);
         boolean activeBefore = player.isRentShieldActive();
+        int moneyBefore = player.getMoney();
         tile.onLand(player, room);
+        int moneyAfter = player.getMoney();
+        int moneyDelta = moneyAfter - moneyBefore;
         int shieldsAfter = countRentShields(player);
         boolean activeAfter = player.isRentShieldActive();
         if (shieldsAfter < shieldsBefore || (activeBefore && !activeAfter)) {
@@ -1541,6 +1785,37 @@ public class GameEngine {
             shieldData.put("auto", "true");
             shieldData.put("tileIndex", String.valueOf(tile.getIndex()));
             emit(EngineEvent.Type.ITEM_USED, player, turnId, shieldData);
+        }
+
+        if (tile instanceof PropertyTile) {
+            PropertyTile prop = (PropertyTile) tile;
+            if (moneyDelta < 0 && prop.getOwner() != null && prop.getOwner() != player) {
+                Map<String, String> rentData = new HashMap<>();
+                rentData.put("tileIndex", String.valueOf(tile.getIndex()));
+                rentData.put("tileName", tile.getName());
+                rentData.put("amount", String.valueOf(-moneyDelta));
+                rentData.put("ownerId", prop.getOwner().getId());
+                emit(EngineEvent.Type.RENT_PAID, player, turnId, rentData);
+            }
+        } else if (tile instanceof model.tile.TaxTile) {
+            if (moneyDelta < 0) {
+                Map<String, String> taxData = new HashMap<>();
+                taxData.put("tileIndex", String.valueOf(tile.getIndex()));
+                taxData.put("tileName", tile.getName());
+                taxData.put("amount", String.valueOf(-moneyDelta));
+                emit(EngineEvent.Type.TAX_PAID, player, turnId, taxData);
+            }
+        } else if (tile instanceof model.tile.CardTile) {
+            model.tile.CardTile cardTile = (model.tile.CardTile) tile;
+            model.card.Card lastCard = cardTile.getLastDrawnCard();
+            if (lastCard != null) {
+                Map<String, String> cardData = new HashMap<>();
+                cardData.put("tileIndex", String.valueOf(tile.getIndex()));
+                cardData.put("deck", cardTile.getDeckType().name());
+                cardData.put("description", lastCard.getDescription());
+                cardData.put("moneyDelta", String.valueOf(moneyDelta));
+                emit(EngineEvent.Type.CARD_DRAWN, player, turnId, cardData);
+            }
         }
     }
 
@@ -1687,7 +1962,14 @@ public class GameEngine {
             HUMAN_CONTROL_RECLAIMED,
             EXTRA_ROLL_GRANTED,
             TURN_ENDED,
-            GAME_FINISHED
+            GAME_FINISHED,
+            DEBT_PENDING,
+            PROPERTY_SOLD,
+            DEBT_SETTLED,
+            PLAYER_BANKRUPT,
+            RENT_PAID,
+            TAX_PAID,
+            CARD_DRAWN
         }
 
         private final String eventId;

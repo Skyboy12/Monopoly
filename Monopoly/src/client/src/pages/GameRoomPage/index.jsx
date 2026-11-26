@@ -57,6 +57,9 @@ function decoratePlayers(players = []) {
 function isItemPhaseCompatible(enginePhase, triggerPhase) {
   if (!triggerPhase) return false
   if (triggerPhase === 'PRE_ROLL') return enginePhase === 'AWAITING_ROLL'
+  if (triggerPhase === 'PRE_ROLL_OR_DECISION') {
+    return enginePhase === 'AWAITING_ROLL' || enginePhase === 'AWAITING_DECISION'
+  }
   if (triggerPhase === 'ON_LAND') {
     return enginePhase === 'RESOLVING_ACTION' || enginePhase === 'AWAITING_DECISION'
   }
@@ -112,6 +115,8 @@ function describePhase(roomStatus, phase) {
       return 'Đang xử lý ô cờ'
     case 'AWAITING_DECISION':
       return 'Quyết định mua / kết thúc lượt'
+    case 'AWAITING_DEBT_SETTLEMENT':
+      return 'Cần bán tài sản trả nợ'
     case 'TIMEOUT':
       return 'Hết giờ — Bot tiếp quản'
     case 'FINISHED':
@@ -156,6 +161,14 @@ export default function GameRoomPage() {
   const [loadingSnapshot, setLoadingSnapshot] = useState(true)
   const [startingGame, setStartingGame] = useState(false)
   const [rolling, setRolling] = useState(false)
+  const [hoveredPlayerId, setHoveredPlayerId] = useState(null)
+  const [pinnedPlayerId, setPinnedPlayerId] = useState(null)
+  const [lastRollerName, setLastRollerName] = useState('')
+  const [actionBanner, setActionBanner] = useState(null)
+  const [moneyDeltas, setMoneyDeltas] = useState({})
+  const actionBannerTimerRef = useRef(null)
+  const rollingAnimTimerRef = useRef(null)
+  const prevMoneyRef = useRef({})
   const [leaving, setLeaving] = useState(false)
   const [wsConnected, setWsConnected] = useState(false)
   const [wsStatus, setWsStatus] = useState('connecting')
@@ -165,7 +178,6 @@ export default function GameRoomPage() {
   const [toast, setToast] = useState('')
   const [turnDeadline, setTurnDeadline] = useState(() => Date.now() + 30000)
   const [nowMs, setNowMs] = useState(() => Date.now())
-  const [upgradeTileIndex, setUpgradeTileIndex] = useState('')
 
   // Context prompt state when using targeted items
   const [pendingItem, setPendingItem] = useState(null)
@@ -537,7 +549,9 @@ export default function GameRoomPage() {
             break
           }
           case 'DICE_ROLLED': {
-            setRolling(false)
+            if (rollingAnimTimerRef.current) window.clearTimeout(rollingAnimTimerRef.current)
+            setRolling(true)
+            rollingAnimTimerRef.current = window.setTimeout(() => setRolling(false), 600)
             const eventTurnId = Number(
               payload.newTurnId ?? payload.currentTurnId ?? payload.turnId ?? message.turnId ?? 0,
             )
@@ -546,6 +560,16 @@ export default function GameRoomPage() {
               dice2: payload.dice2,
               total: payload.total,
             }
+            const rollerId = payload.playerId || message.senderId || gameStateRef.current.currentPlayerId
+            const rollerName = payload.playerName || resolveActorName(rollerId)
+            if (rollerName) setLastRollerName(rollerName)
+            if (actionBannerTimerRef.current) window.clearTimeout(actionBannerTimerRef.current)
+            setActionBanner({
+              key: `roll-${Date.now()}`,
+              text: `${rollerName || 'Người chơi'} tung được ${payload.total}`,
+              tone: 'info',
+            })
+            actionBannerTimerRef.current = window.setTimeout(() => setActionBanner(null), 2500)
             setGameState((prev) => {
               if (eventTurnId > 0 && eventTurnId < prev.turnId) return prev
               const nextPhase =
@@ -558,6 +582,62 @@ export default function GameRoomPage() {
                 lastDice: diceObj,
               }
             })
+            break
+          }
+          case 'PROPERTY_BOUGHT': {
+            const buyerId = payload.playerId || message.senderId
+            const buyerName = payload.playerName || resolveActorName(buyerId)
+            const tileIdx = Number(payload.tileIndex)
+            const tileName = BOARD_TILE_META[tileIdx]?.name || `Ô #${tileIdx}`
+            if (actionBannerTimerRef.current) window.clearTimeout(actionBannerTimerRef.current)
+            setActionBanner({
+              key: `buy-${Date.now()}`,
+              text: `${buyerName || 'Người chơi'} đã mua ${tileName}`,
+              tone: 'success',
+            })
+            actionBannerTimerRef.current = window.setTimeout(() => setActionBanner(null), 2500)
+            setGameState((prev) => ({
+              ...prev,
+              tiles: prev.tiles.map((t) =>
+                t.index === tileIdx ? { ...t, ownerId: buyerId } : t,
+              ),
+              players: prev.players.map((p) =>
+                p.id === buyerId && payload.playerMoney !== undefined
+                  ? { ...p, money: Number(payload.playerMoney) }
+                  : p,
+              ),
+            }))
+            break
+          }
+          case 'PROPERTY_SOLD': {
+            const sellerId = payload.playerId || message.senderId
+            const sellerName = payload.playerName || resolveActorName(sellerId)
+            const tileIdx = Number(payload.tileIndex)
+            const tileName = BOARD_TILE_META[tileIdx]?.name || `Ô #${tileIdx}`
+            if (actionBannerTimerRef.current) window.clearTimeout(actionBannerTimerRef.current)
+            setActionBanner({
+              key: `sell-${Date.now()}`,
+              text: `${sellerName || 'Người chơi'} đã bán ${tileName}`,
+              tone: 'warn',
+            })
+            actionBannerTimerRef.current = window.setTimeout(() => setActionBanner(null), 2500)
+            setGameState((prev) => ({
+              ...prev,
+              tiles: prev.tiles.map((t) =>
+                t.index === tileIdx
+                  ? { ...t, ownerId: null, houseCount: 0, hasHotel: false }
+                  : t,
+              ),
+              players: prev.players.map((p) =>
+                p.id === sellerId && payload.playerMoney !== undefined
+                  ? {
+                      ...p,
+                      money: Number(payload.playerMoney),
+                      debt: payload.playerDebt !== undefined ? Number(payload.playerDebt) : p.debt,
+                    }
+                  : p,
+              ),
+            }))
             break
           }
           case 'PROPERTY_UPGRADED': {
@@ -640,7 +720,7 @@ export default function GameRoomPage() {
                 phase: nextPhase,
                 botControl: Boolean(payload.botControl),
                 roomStatus: payload.roomStatus || prev.roomStatus,
-                lastDice: payload.code === 'EXTRA_ROLL' ? prev.lastDice : null,
+                lastDice: prev.lastDice,
               }
             })
             break
@@ -736,9 +816,14 @@ export default function GameRoomPage() {
     isPurchasableTile &&
     (myPlayer?.money ?? 0) >= (myTile?.price ?? 0)
   const upgradableTiles =
-    isMyTurn && gameState.phase === 'AWAITING_DECISION' && myPlayer?.status === 'ACTIVE'
+    isMyTurn &&
+    gameState.phase === 'AWAITING_DECISION' &&
+    myPlayer?.status === 'ACTIVE' &&
+    (gameState.upgradeTileIndex ?? -1) >= 0 &&
+    !gameState.upgradedThisTurn
       ? gameState.tiles.filter(
           (tile) =>
+            tile.index === gameState.upgradeTileIndex &&
             tile.type === 'STREET' &&
             tile.ownerId === playerId &&
             !tile.hasHotel &&
@@ -747,11 +832,39 @@ export default function GameRoomPage() {
         )
       : []
   const canUpgrade = upgradableTiles.length > 0
-  const selectedUpgradeTile =
-    upgradableTiles.find((t) => String(t.index) === String(upgradeTileIndex)) ||
-    (myTile && upgradableTiles.find((t) => t.index === myTile.index)) ||
-    upgradableTiles[0] ||
-    null
+  const selectedUpgradeTile = upgradableTiles[0] || null
+  const isDebtSettlement =
+    isMyTurn && gameState.phase === 'AWAITING_DEBT_SETTLEMENT' && (myPlayer?.debt ?? 0) > 0
+  const myOwnedTilesForSale = isDebtSettlement
+    ? gameState.tiles.filter((t) => t.ownerId === playerId)
+    : []
+  const highlightedPlayerId = hoveredPlayerId || pinnedPlayerId || null
+
+  useEffect(() => {
+    const prevMap = prevMoneyRef.current
+    const updates = {}
+    gameState.players.forEach((p) => {
+      const curr = Number(p.money ?? 0)
+      if (prevMap[p.id] !== undefined && prevMap[p.id] !== curr) {
+        updates[p.id] = { diff: curr - prevMap[p.id], key: `${Date.now()}-${p.id}` }
+      }
+      prevMap[p.id] = curr
+    })
+    if (Object.keys(updates).length > 0) {
+      setMoneyDeltas((prev) => ({ ...prev, ...updates }))
+      const timer = window.setTimeout(() => {
+        setMoneyDeltas((prev) => {
+          const next = { ...prev }
+          Object.keys(updates).forEach((id) => {
+            if (next[id]?.key === updates[id].key) delete next[id]
+          })
+          return next
+        })
+      }, 1900)
+      return () => window.clearTimeout(timer)
+    }
+    return undefined
+  }, [gameState.players])
   const canEndTurn =
     isMyTurn &&
     (gameState.phase === 'AWAITING_DECISION' ||
@@ -964,12 +1077,17 @@ export default function GameRoomPage() {
     items: myItems.map((item) => {
       const isPassive = item.id === 'RENT_SHIELD' || item.triggerPhase === 'PASSIVE'
       const phaseOk = isItemPhaseCompatible(gameState.phase, item.triggerPhase)
-      const usable = !isPassive && isMyTurn && phaseOk
+      const inJailOrDebt = myPlayer?.status === 'IN_JAIL' || (myPlayer?.debt ?? 0) > 0
+      const usable = !isPassive && isMyTurn && phaseOk && !inJailOrDebt
       let reason = ''
       if (isPassive) {
         reason = 'Tự động kích hoạt khi trả tiền thuê'
       } else if (!isMyTurn) {
         reason = 'Chưa tới lượt của bạn'
+      } else if (myPlayer?.status === 'IN_JAIL') {
+        reason = 'Không thể dùng vật phẩm khi đang ở tù'
+      } else if ((myPlayer?.debt ?? 0) > 0) {
+        reason = 'Cần trả hết nợ trước khi dùng vật phẩm'
       } else if (!phaseOk) {
         reason = `Chỉ dùng ở pha ${item.triggerPhase}`
       }
@@ -1151,8 +1269,13 @@ export default function GameRoomPage() {
                     : player.ownedCount ?? 0
                 return (
                   <div
-                    className={`player-row ${isTurn ? 'is-current' : ''} ${player.status === 'BANKRUPT' ? 'is-bankrupt' : ''}`}
+                    className={`player-row ${isTurn ? 'is-current' : ''} ${player.status === 'BANKRUPT' ? 'is-bankrupt' : ''} ${highlightedPlayerId === player.id ? 'is-highlighted' : ''}`}
                     key={player.id}
+                    onMouseEnter={() => setHoveredPlayerId(player.id)}
+                    onMouseLeave={() => setHoveredPlayerId((prev) => (prev === player.id ? null : prev))}
+                    onClick={() =>
+                      setPinnedPlayerId((prev) => (prev === player.id ? null : player.id))
+                    }
                   >
                     <div className="player-info">
                       <div className="player-avatar" style={{ background: player.color }}>
@@ -1178,7 +1301,18 @@ export default function GameRoomPage() {
                         </p>
                       </div>
                     </div>
-                    <strong>{formatMoney(player.money ?? 0)}</strong>
+                    <strong>
+                      {formatMoney(player.money ?? 0)}
+                      {moneyDeltas[player.id] && (
+                        <span
+                          key={moneyDeltas[player.id].key}
+                          className={`money-delta ${moneyDeltas[player.id].diff >= 0 ? 'pos' : 'neg'}`}
+                        >
+                          {moneyDeltas[player.id].diff >= 0 ? '+' : ''}
+                          {formatMoney(moneyDeltas[player.id].diff)}
+                        </span>
+                      )}
+                    </strong>
                   </div>
                 )
               })}
@@ -1244,6 +1378,11 @@ export default function GameRoomPage() {
             rentMultiplier={gameState.rentMultiplier}
             itemControls={itemControls}
             itemFx={itemFx}
+            highlightedPlayerId={highlightedPlayerId}
+            sellableTileIndices={myOwnedTilesForSale.map((t) => t.index)}
+            forcedDiceValue={gameState.forcedDiceValue ?? null}
+            lastRollerName={lastRollerName}
+            actionBanner={actionBanner}
           />
           <div className="status-pill">
             <div>
@@ -1348,22 +1487,48 @@ export default function GameRoomPage() {
               </span>
             </button>
 
+            {isDebtSettlement && (
+              <div className="debt-panel">
+                <div className="debt-panel-head">
+                  <span>Cần trả nợ</span>
+                  <span>
+                    Số dư: {formatMoney((myPlayer?.money ?? 0) - (myPlayer?.debt ?? 0))}
+                  </span>
+                </div>
+                <div className="debt-sell-list">
+                  {myOwnedTilesForSale.length === 0 ? (
+                    <small>Không còn tài sản để bán.</small>
+                  ) : (
+                    myOwnedTilesForSale.map((tile) => {
+                      const bCost = tile.buildingCost || 50000
+                      const bVal = tile.hasHotel
+                        ? 5 * bCost
+                        : (tile.houseCount ?? 0) * bCost
+                      const refund = Math.floor(((tile.price || 0) + bVal) / 2)
+                      return (
+                        <div className="debt-sell-row" key={tile.index}>
+                          <span>
+                            #{tile.index} {tile.name} (+{formatMoney(refund)})
+                          </span>
+                          <button
+                            type="button"
+                            className="debt-sell-btn"
+                            onClick={() =>
+                              socketRef.current?.sendSell(gameState.turnId, tile.index)
+                            }
+                          >
+                            Bán
+                          </button>
+                        </div>
+                      )
+                    })
+                  )}
+                </div>
+              </div>
+            )}
+
             {canUpgrade && (
               <div className="upgrade-control-group">
-                {upgradableTiles.length > 1 && (
-                  <select
-                    className="upgrade-select"
-                    aria-label="Chọn đất nâng cấp"
-                    value={selectedUpgradeTile?.index ?? ''}
-                    onChange={(e) => setUpgradeTileIndex(e.target.value)}
-                  >
-                    {upgradableTiles.map((tile) => (
-                      <option value={tile.index} key={tile.index}>
-                        #{tile.index} {tile.name} ({formatMoney(tile.buildingCost || 50000)})
-                      </option>
-                    ))}
-                  </select>
-                )}
                 <button
                   type="button"
                   className="side-action upgrade-action enabled"

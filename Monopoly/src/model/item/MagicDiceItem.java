@@ -23,6 +23,9 @@ public class MagicDiceItem extends Item {
         if (user == null || room == null || context == null || context.getDesiredDiceValue() == null) {
             return false;
         }
+        if (room.getForcedDiceValue() != null) {
+            return false;
+        }
         int val = context.getDesiredDiceValue();
         return val >= 2 && val <= 12;
     }

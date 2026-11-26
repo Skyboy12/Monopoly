@@ -30,6 +30,9 @@ public class Player {
     private final Inventory inventory;
     private boolean isBot;
     private int turnsInJail;
+    private int pendingDebt;
+    private Player pendingCreditor;
+    private boolean pendingDebtIsBail;
 
     public Player(String id, String name, int initialMoney) {
         this.id = id;
@@ -261,5 +264,47 @@ public class Player {
             return true;
         }
         return false;
+    }
+
+    public synchronized void registerDebt(int amount, Player creditor, boolean isBail) {
+        this.pendingDebt = Math.max(0, amount);
+        this.pendingCreditor = creditor;
+        this.pendingDebtIsBail = isBail;
+    }
+
+    public synchronized boolean hasPendingDebt() {
+        return this.pendingDebt > 0;
+    }
+
+    public synchronized int getPendingDebt() {
+        return this.pendingDebt;
+    }
+
+    public synchronized Player getPendingCreditor() {
+        return this.pendingCreditor;
+    }
+
+    public synchronized boolean isPendingDebtIsBail() {
+        return this.pendingDebtIsBail;
+    }
+
+    public synchronized void clearDebt() {
+        this.pendingDebt = 0;
+        this.pendingCreditor = null;
+        this.pendingDebtIsBail = false;
+    }
+
+    public synchronized int getLiquidationValue() {
+        int total = 0;
+        for (PropertyTile p : this.ownedProperties) {
+            int buildingValue = 0;
+            if (p instanceof StreetProperty) {
+                StreetProperty sp = (StreetProperty) p;
+                int cost = sp.getBuildingCost();
+                buildingValue = sp.isHasHotel() ? 5 * cost : sp.getHouseCount() * cost;
+            }
+            total += (p.getPrice() + buildingValue) / 2;
+        }
+        return total;
     }
 }

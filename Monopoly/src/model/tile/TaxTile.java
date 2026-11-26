@@ -30,8 +30,12 @@ public class TaxTile extends Tile {
         // Khấu trừ số tiền thuế (taxAmount) từ tài khoản người chơi nộp vào ngân hàng
         boolean success = player.deductMoney(this.taxAmount);
         if (!success) {
-            // Không đủ tiền đóng thuế -> Tuyên bố phá sản trước ngân hàng (creditor = null)
-            player.declareBankruptcy(null);
+            if (player.getMoney() + player.getLiquidationValue() >= this.taxAmount) {
+                player.registerDebt(this.taxAmount, null, false);
+            } else {
+                // Không đủ tiền đóng thuế -> Tuyên bố phá sản trước ngân hàng (creditor = null)
+                player.declareBankruptcy(null);
+            }
         }
     }
 }

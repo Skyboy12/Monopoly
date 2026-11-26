@@ -132,6 +132,64 @@ public class GameWebSocketController {
     }
 
     /**
+     * Endpoint: /app/room/{roomId}/sell-property
+     */
+    public GameMessage handleSellProperty(String roomId, String playerId, int turnId, int tileIndex, GameEngine engine) {
+        if (engine == null) {
+            return buildError(roomId, playerId, turnId, "ENGINE_NOT_FOUND", "Không tìm thấy GameEngine.");
+        }
+
+        ActionResult result = engine.sellProperty(roomId, playerId, turnId, tileIndex, "SELL-" + UUID.randomUUID());
+        if (!result.isSuccess()) {
+            return buildError(roomId, playerId, turnId, result.getCode(), result.getMessage());
+        }
+
+        String phaseName = engine.getEffectivePhase().name();
+        synchronized (roomId != null ? engine.getRoom() : engine) {
+            GameRoom room = engine.getRoom();
+            Player seller = room.getCurrentPlayer();
+            if (seller == null || !seller.getId().equals(playerId)) {
+                for (Player p : room.getPlayers()) {
+                    if (p.getId().equals(playerId)) {
+                        seller = p;
+                        break;
+                    }
+                }
+            }
+            if (seller == null) {
+                return buildError(roomId, playerId, turnId, "PLAYER_NOT_FOUND", "Không tìm thấy người chơi.");
+            }
+            Tile tile = room.getBoard().getTile(tileIndex);
+            String tileName = (tile != null && tile.getName() != null) ? tile.getName() : ("Ô #" + tileIndex);
+            int refund = 0;
+            if (tile instanceof PropertyTile prop) {
+                int buildingValue = 0;
+                if (prop instanceof StreetProperty sp) {
+                    buildingValue = sp.isHasHotel()
+                            ? 5 * sp.getBuildingCost()
+                            : sp.getHouseCount() * sp.getBuildingCost();
+                }
+                refund = (prop.getPrice() + buildingValue) / 2;
+            }
+            int debt = seller.getPendingDebt();
+            boolean settled = !seller.hasPendingDebt();
+
+            String payload = String.format(
+                    "{\"sellerId\":\"%s\",\"tileIndex\":%d,\"tileName\":\"%s\",\"refund\":%d,\"remainingMoney\":%d,\"debt\":%d,\"settled\":%b,\"phase\":\"%s\"}",
+                    SimpleJson.escape(playerId),
+                    tileIndex,
+                    SimpleJson.escape(tileName),
+                    refund,
+                    seller.getMoney(),
+                    debt,
+                    settled,
+                    SimpleJson.escape(phaseName)
+            );
+            return new GameMessage("PROPERTY_SOLD", playerId, room.getId(), room.getTurnId(), payload);
+        }
+    }
+
+    /**
      * Endpoint: /app/room/{roomId}/upgrade-property
      */
     public GameMessage handleUpgradeProperty(String roomId, String playerId, int turnId, int tileIndex, GameEngine engine) {
@@ -377,8 +435,11 @@ public class GameWebSocketController {
                 }
                 itemsJson.append("]");
 
+                String debtCreditorIdJson = (p.getPendingCreditor() != null)
+                        ? "\"" + SimpleJson.escape(p.getPendingCreditor().getId()) + "\""
+                        : "null";
                 playersJson.append(String.format(
-                        "{\"id\":\"%s\",\"name\":\"%s\",\"money\":%d,\"position\":%d,\"status\":\"%s\",\"turnsInJail\":%d,\"rentShieldActive\":%b,\"ownedCount\":%d,\"isBot\":%b,\"ownedTiles\":%s,\"items\":%s}",
+                        "{\"id\":\"%s\",\"name\":\"%s\",\"money\":%d,\"position\":%d,\"status\":\"%s\",\"turnsInJail\":%d,\"rentShieldActive\":%b,\"ownedCount\":%d,\"isBot\":%b,\"debt\":%d,\"debtCreditorId\":%s,\"ownedTiles\":%s,\"items\":%s}",
                         SimpleJson.escape(p.getId()),
                         SimpleJson.escape(p.getName()),
                         p.getMoney(),
@@ -388,6 +449,8 @@ public class GameWebSocketController {
                         p.isRentShieldActive(),
                         ownedProps.size(),
                         p.isBot(),
+                        p.getPendingDebt(),
+                        debtCreditorIdJson,
                         ownedTilesJson,
                         itemsJson
                 ));
@@ -529,9 +592,14 @@ public class GameWebSocketController {
             long serverTimeEpochMs = System.currentTimeMillis();
             long safeDeadline = Math.max(0L, turnDeadlineEpochMs);
 
+            Integer forcedDice = room.getForcedDiceValue();
+            String forcedDiceJson = (forcedDice == null) ? "null" : String.valueOf(forcedDice);
+            int upgradeTileIndex = engine.getUpgradeableTileIndex();
+            boolean upgradedThisTurn = engine.isUpgradedThisTurn();
+
             Player current = room.getCurrentPlayer();
             String payload = String.format(
-                    "{\"roomId\":\"%s\",\"roomName\":\"%s\",\"hostId\":\"%s\",\"roomStatus\":\"%s\",\"maxPlayers\":%d,\"turnId\":%d,\"phase\":\"%s\",\"actionPhase\":\"%s\",\"botControl\":%b,\"currentPlayerId\":\"%s\",\"turnDeadlineEpochMs\":%d,\"serverTimeEpochMs\":%d,\"turnTimeoutSeconds\":%d,\"rentMultiplier\":%d,\"activeEvents\":%s,\"lastDice\":%s,\"players\":%s,\"tiles\":%s,\"logs\":%s,\"timeline\":%s}",
+                    "{\"roomId\":\"%s\",\"roomName\":\"%s\",\"hostId\":\"%s\",\"roomStatus\":\"%s\",\"maxPlayers\":%d,\"turnId\":%d,\"phase\":\"%s\",\"actionPhase\":\"%s\",\"botControl\":%b,\"currentPlayerId\":\"%s\",\"turnDeadlineEpochMs\":%d,\"serverTimeEpochMs\":%d,\"turnTimeoutSeconds\":%d,\"rentMultiplier\":%d,\"forcedDiceValue\":%s,\"upgradeTileIndex\":%d,\"upgradedThisTurn\":%b,\"activeEvents\":%s,\"lastDice\":%s,\"players\":%s,\"tiles\":%s,\"logs\":%s,\"timeline\":%s}",
                     SimpleJson.escape(room.getId()),
                     SimpleJson.escape(room.getName()),
                     SimpleJson.escape(resolvedHostId == null ? "" : resolvedHostId),
@@ -546,6 +614,9 @@ public class GameWebSocketController {
                     serverTimeEpochMs,
                     Math.max(1, turnTimeoutSeconds),
                     room.getRentMultiplier(),
+                    forcedDiceJson,
+                    upgradeTileIndex,
+                    upgradedThisTurn,
                     activeEventsJson,
                     lastDiceJson,
                     playersJson,

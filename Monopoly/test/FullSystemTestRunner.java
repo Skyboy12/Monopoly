@@ -90,6 +90,7 @@ public class FullSystemTestRunner {
     }
 
     public static void main(String[] args) {
+        System.setProperty("monopoly.botStepDelayMs", "0");
         FullSystemTestRunner runner = new FullSystemTestRunner();
         runner.runAll();
     }
@@ -162,6 +163,24 @@ public class FullSystemTestRunner {
                 this::testSuiteE_TimelineRentTableAndBotPositionSync);
         runTest("Suite E", "Auto RENT_SHIELD -> ITEM_USED auto=true STOMP broadcast + exactly one log line",
                 this::testSuiteE_AutoRentShieldStompAndSingleLog);
+
+        // Suite F — Debt Settlement, Upgrade Rules, Pre-Roll Items, Bot Pacing & Broadcasts
+        runTest("Suite F", "Rent debt -> DEBT_PENDING -> sellProperty -> DEBT_SETTLED & oversell INVALID_PHASE",
+                this::testSuiteF_RentDebtSellAndOversellRejected);
+        runTest("Suite F", "Auto-bankruptcy when money + liquidationValue < debt",
+                this::testSuiteF_AutoBankruptcyWhenInsufficientLiquidation);
+        runTest("Suite F", "Tax debt (TaxTile) & jail bail debt (JailTile 3rd turn)",
+                this::testSuiteF_TaxAndJailBailDebt);
+        runTest("Suite F", "Upgrade rules: NOT_ON_TILE, ALREADY_UPGRADED_THIS_TURN, HOTEL_REQUIRES_REVISIT & swap block",
+                this::testSuiteF_UpgradeRulesAndSwapBlock);
+        runTest("Suite F", "Pre-roll items succeed at AWAITING_ROLL & double MAGIC_DICE rejected",
+                this::testSuiteF_PreRollItemsAndDoubleMagicDiceRejected);
+        runTest("Suite F", "STOMP /sell-property -> PROPERTY_SOLD & new snapshot fields",
+                this::testSuiteF_StompSellPropertyAndSnapshotFields);
+        runTest("Suite F", "RENT_PAID & TAX_PAID STOMP broadcasts",
+                this::testSuiteF_RentPaidAndTaxPaidStompBroadcasts);
+        runTest("Suite F", "Bot pacing: monopoly.botStepDelayMs=300 takes >= 600ms",
+                this::testSuiteF_BotPacingDelay);
 
         printSummaryAndExit();
     }
@@ -1018,13 +1037,11 @@ public class FullSystemTestRunner {
                 String err2Dest = "/queue/player/" + p2.userId + "/errors";
 
                 c1.subscribe("sub-room-1", topicDest);
+                Map<String, Object> snap1 = awaitGameSnapshot(c1, topicDest, 8000);
                 c1.subscribe("sub-err-1", err1Dest);
                 c2.subscribe("sub-room-2", topicDest);
+                Map<String, Object> snap2 = awaitGameSnapshot(c2, topicDest, 8000);
                 c2.subscribe("sub-err-2", err2Dest);
-
-                // Both receive initial GAME_STATE_SNAPSHOT
-                Map<String, Object> snap1 = awaitGameSnapshot(c1, topicDest, 4000);
-                Map<String, Object> snap2 = awaitGameSnapshot(c2, topicDest, 4000);
                 assertEquals("PLAYING", snap1.get("roomStatus"), "c1 snapshot PLAYING");
                 assertEquals("PLAYING", snap2.get("roomStatus"), "c2 snapshot PLAYING");
                 assertTrue(((Number) snap1.get("turnDeadlineEpochMs")).longValue() > 0L,
@@ -1281,7 +1298,8 @@ public class FullSystemTestRunner {
                 for (int i = 0; i < 6; i++) {
                     @SuppressWarnings("unchecked")
                     List<Object> curLogs = (List<Object>) postBotPayload.get("logs");
-                    if (curLogs != null && curLogs.stream().anyMatch(l -> String.valueOf(l).contains("[Bot]"))) {
+                    if (curLogs != null && curLogs.stream().anyMatch(l -> String.valueOf(l).contains("[Bot]"))
+                            && ((Number) postBotPayload.get("turnDeadlineEpochMs")).longValue() > 0L) {
                         break;
                     }
                     Map<String, Object> nextSnap = awaitTopicMessageOfType(c1, topicDest, "GAME_STATE_SNAPSHOT", 3000);
@@ -1536,9 +1554,9 @@ public class FullSystemTestRunner {
                 assertEquals("CONNECTED", c1.connectAndExpectFrame("Bearer " + p1.token, 4000).command, "c1 CONNECTED");
                 assertEquals("CONNECTED", c2.connectAndExpectFrame("Bearer " + p2.token, 4000).command, "c2 CONNECTED");
                 c1.subscribe("sub-1", topicDest);
+                awaitGameSnapshot(c1, topicDest, 8000);
                 c2.subscribe("sub-2", topicDest);
-                awaitGameSnapshot(c1, topicDest, 4000);
-                awaitGameSnapshot(c2, topicDest, 4000);
+                awaitGameSnapshot(c2, topicDest, 8000);
 
                 assertEquals(200, RawHttpClient.request("127.0.0.1", port, "POST", "/api/v1/rooms/" + roomId + "/start", h1, "{}").statusCode,
                         "Start -> 200");
@@ -2092,6 +2110,334 @@ public class FullSystemTestRunner {
         } finally {
             server.stop();
             roomManager.shutdown();
+        }
+    }
+
+    // =========================================================================
+    // SUITE F: DEBT SETTLEMENT, UPGRADE RULES, PRE-ROLL ITEMS & BOT PACING
+    // =========================================================================
+
+    private void testSuiteF_RentDebtSellAndOversellRejected() {
+        GameRoom room = new GameRoom("suite-f-rent", "Rent Debt Room", 2);
+        Player p1 = new Player("f-p1", "Debtor", 1_500_000);
+        Player p2 = new Player("f-p2", "Creditor", 1_500_000);
+        room.addPlayer(p1);
+        room.addPlayer(p2);
+        room.setStatus(RoomStatus.PLAYING);
+
+        StreetProperty tile1 = (StreetProperty) room.getBoard().getTile(1); // price 60k -> refund 30k
+        p1.buyProperty(tile1);
+        p1.deductMoney(p1.getMoney());
+        p1.addMoney(10_000); // cash = 10k, liquidation = 30k, total = 40k
+        StreetProperty tile3 = (StreetProperty) room.getBoard().getTile(3);
+        p2.buyProperty(tile3);
+        tile3.setHouseCount(1); // rent = 20_000
+
+        GameEngine engine = new GameEngine(room);
+        room.setForcedDiceValue(3);
+        ActionResult rollRes = engine.rollDice(room.getId(), p1.getId(), room.getTurnId(), "act-1");
+        assertEquals("DEBT_PENDING", rollRes.getCode(), "Insufficient cash with enough liquidation -> DEBT_PENDING");
+        assertTrue(p1.hasPendingDebt(), "Player has pending debt");
+
+        ActionResult endRes = engine.endTurn(room.getId(), p1.getId(), room.getTurnId(), "act-2");
+        assertFalse(endRes.isSuccess(), "endTurn blocked during AWAITING_DEBT_SETTLEMENT");
+
+        ActionResult sellRes = engine.sellProperty(room.getId(), p1.getId(), room.getTurnId(), 1, "act-3");
+        assertTrue(sellRes.isSuccess(), "sellProperty succeeds: " + sellRes.getMessage());
+        assertFalse(p1.hasPendingDebt(), "Debt cleared after selling");
+        assertEquals(28_000, p1.getMoney(), "Debtor has 10k + 30k - 12k = 28k");
+
+        ActionResult oversell = engine.sellProperty(room.getId(), p1.getId(), room.getTurnId(), 1, "act-4");
+        assertFalse(oversell.isSuccess(), "Oversell rejected");
+        assertEquals("INVALID_PHASE", oversell.getCode(), "Oversell returns INVALID_PHASE");
+    }
+
+    private void testSuiteF_AutoBankruptcyWhenInsufficientLiquidation() {
+        GameRoom room = new GameRoom("suite-f-bankrupt", "Bankrupt Room", 2);
+        Player p1 = new Player("f-b1", "Poor", 5_000);
+        Player p2 = new Player("f-b2", "Rich", 1_500_000);
+        room.addPlayer(p1);
+        room.addPlayer(p2);
+        room.setStatus(RoomStatus.PLAYING);
+
+        StreetProperty tile3 = (StreetProperty) room.getBoard().getTile(3);
+        p2.buyProperty(tile3);
+        tile3.setHouseCount(1); // rent 20_000 > p1's 5_000 + 0 liquidation
+
+        GameEngine engine = new GameEngine(room);
+        room.setForcedDiceValue(3);
+        engine.rollDice(room.getId(), p1.getId(), room.getTurnId(), "act-b1");
+        assertEquals(PlayerStatus.BANKRUPT, p1.getStatus(), "p1 becomes BANKRUPT immediately when cash+liquidation < debt");
+    }
+
+    private void testSuiteF_TaxAndJailBailDebt() {
+        GameRoom room1 = new GameRoom("suite-f-tax", "Tax Debt Room", 2);
+        Player p1 = new Player("f-t1", "TaxDebtor", 1_500_000);
+        Player p2 = new Player("f-t2", "Other", 1_500_000);
+        room1.addPlayer(p1);
+        room1.addPlayer(p2);
+        room1.setStatus(RoomStatus.PLAYING);
+        StreetProperty tile1 = (StreetProperty) room1.getBoard().getTile(1);
+        p1.buyProperty(tile1); // refund 30k
+        p1.deductMoney(p1.getMoney());
+        p1.addMoney(180_000); // 180k + 30k = 210k >= 200k tax
+        GameEngine engine1 = new GameEngine(room1);
+        room1.setForcedDiceValue(4); // Income Tax tile 4 ($200,000)
+        ActionResult taxRes = engine1.rollDice(room1.getId(), p1.getId(), room1.getTurnId(), "act-t1");
+        assertEquals("DEBT_PENDING", taxRes.getCode(), "TaxTile insufficient cash -> DEBT_PENDING");
+        assertTrue(p1.hasPendingDebt(), "Player has pending tax debt");
+        assertEquals(200_000, p1.getPendingDebt(), "Pending debt is 200k");
+
+        GameRoom room2 = new GameRoom("suite-f-jail", "Jail Debt Room", 2);
+        Player j1 = new Player("f-j1", "JailDebtor", 1_500_000);
+        Player j2 = new Player("f-j2", "Other2", 1_500_000);
+        room2.addPlayer(j1);
+        room2.addPlayer(j2);
+        room2.setStatus(RoomStatus.PLAYING);
+        StreetProperty jTile1 = (StreetProperty) room2.getBoard().getTile(1);
+        j1.buyProperty(jTile1); // refund 30k
+        j1.deductMoney(j1.getMoney());
+        j1.addMoney(30_000); // 30k + 30k = 60k >= 50k bail
+        j1.sendToJail(10);
+        j1.setTurnsInJail(2);
+        GameEngine engine2 = new GameEngine(room2);
+        room2.setForcedDiceValue(3); // non-double (1+2)
+        ActionResult jailRes = engine2.rollDice(room2.getId(), j1.getId(), room2.getTurnId(), "act-j1");
+        assertEquals("DEBT_PENDING", jailRes.getCode(), "Jail 3rd turn forced bail with insufficient cash -> DEBT_PENDING");
+        assertTrue(j1.isPendingDebtIsBail(), "Pending debt is marked as bail");
+    }
+
+    private void testSuiteF_UpgradeRulesAndSwapBlock() {
+        GameRoom room = new GameRoom("suite-f-upg", "Upgrade Rules Room", 2);
+        Player p1 = new Player("f-u1", "Upgrader", 2_000_000);
+        Player p2 = new Player("f-u2", "Other", 2_000_000);
+        room.addPlayer(p1);
+        room.addPlayer(p2);
+        room.setStatus(RoomStatus.PLAYING);
+
+        StreetProperty tile1 = (StreetProperty) room.getBoard().getTile(1);
+        StreetProperty tile3 = (StreetProperty) room.getBoard().getTile(3);
+        p1.buyProperty(tile1);
+        p1.buyProperty(tile3);
+
+        GameEngine engine = new GameEngine(room);
+        room.setForcedDiceValue(3);
+        engine.rollDice(room.getId(), p1.getId(), room.getTurnId(), "act-u1");
+
+        ActionResult notOnTile = engine.upgradeProperty(room.getId(), p1.getId(), room.getTurnId(), 1, "act-u2");
+        assertEquals("NOT_ON_TILE", notOnTile.getCode(), "Upgrading tile 1 while on tile 3 -> NOT_ON_TILE");
+
+        ActionResult upg1 = engine.upgradeProperty(room.getId(), p1.getId(), room.getTurnId(), 3, "act-u3");
+        assertTrue(upg1.isSuccess(), "Upgrade 0->1 on landed tile succeeds: " + upg1.getCode() + " " + upg1.getMessage());
+        assertEquals(1, tile3.getHouseCount(), "tile3 has 1 house");
+
+        ActionResult upgAgain = engine.upgradeProperty(room.getId(), p1.getId(), room.getTurnId(), 3, "act-u4");
+        assertEquals("ALREADY_UPGRADED_THIS_TURN", upgAgain.getCode(), "Second upgrade in same turn -> ALREADY_UPGRADED_THIS_TURN");
+
+        // Advance to p1's next turn and test swap blocking upgrade
+        engine.endTurn(room.getId(), p1.getId(), room.getTurnId(), "act-u5");
+        room.setForcedDiceValue(5);
+        engine.rollDice(room.getId(), p2.getId(), room.getTurnId(), "act-u6");
+        engine.endTurn(room.getId(), p2.getId(), room.getTurnId(), "act-u7");
+
+        // Test swap blocking upgrade on a fresh turn
+        p2.setPosition(5);
+        p2.addMoney(1_000_000);
+        p1.getInventory().addItem(new FortuneSwapItem());
+        ActionResult swapRes = engine.useItem(room.getId(), p1.getId(), room.getTurnId(), "FORTUNE_SWAP",
+                new ItemTargetContext(null, -1, -1), "act-u8");
+        assertTrue(swapRes.isSuccess(), "FORTUNE_SWAP succeeds at AWAITING_ROLL: " + swapRes.getCode() + " " + swapRes.getMessage());
+        assertEquals(-1, engine.getUpgradeableTileIndex(), "getUpgradeableTileIndex is -1 after swap");
+    }
+
+    private void testSuiteF_PreRollItemsAndDoubleMagicDiceRejected() {
+        GameRoom room = new GameRoom("suite-f-items", "Pre-Roll Items Room", 2);
+        Player p1 = new Player("f-i1", "ItemUser", 1_500_000);
+        Player p2 = new Player("f-i2", "Target", 1_500_000);
+        room.addPlayer(p1);
+        room.addPlayer(p2);
+        room.setStatus(RoomStatus.PLAYING);
+
+        StreetProperty tile1 = (StreetProperty) room.getBoard().getTile(1);
+        p2.buyProperty(tile1);
+        tile1.setHouseCount(2);
+
+        p1.getInventory().addItem(new DynamiteItem());
+        p1.getInventory().addItem(new HostileTakeoverItem());
+        p1.getInventory().addItem(new ArrestWarrantItem());
+        p1.getInventory().addItem(new MagicDiceItem());
+        p1.getInventory().addItem(new MagicDiceItem());
+
+        GameEngine engine = new GameEngine(room);
+
+        assertTrue(engine.useItem(room.getId(), p1.getId(), room.getTurnId(), "DYNAMITE",
+                new ItemTargetContext(null, 1, -1), "act-i1").isSuccess(), "DYNAMITE succeeds at AWAITING_ROLL");
+        assertTrue(engine.useItem(room.getId(), p1.getId(), room.getTurnId(), "HOSTILE_TAKEOVER",
+                new ItemTargetContext(null, 1, -1), "act-i2").isSuccess(), "HOSTILE_TAKEOVER succeeds at AWAITING_ROLL");
+        assertTrue(engine.useItem(room.getId(), p1.getId(), room.getTurnId(), "ARREST_WARRANT",
+                new ItemTargetContext(p2.getId(), -1, -1), "act-i3").isSuccess(), "ARREST_WARRANT succeeds at AWAITING_ROLL");
+
+        assertTrue(engine.useItem(room.getId(), p1.getId(), room.getTurnId(), "MAGIC_DICE",
+                new ItemTargetContext(null, -1, 6), "act-i4").isSuccess(), "First MAGIC_DICE succeeds");
+        assertFalse(engine.useItem(room.getId(), p1.getId(), room.getTurnId(), "MAGIC_DICE",
+                new ItemTargetContext(null, -1, 4), "act-i5").isSuccess(), "Double MAGIC_DICE rejected");
+    }
+
+    private void testSuiteF_StompSellPropertyAndSnapshotFields() throws Exception {
+        GatewayConfig config = new GatewayConfig(0, "dev", null, TEST_JWT_SECRET, 3600_000L);
+        CloudflareOriginFilter originFilter = config.createOriginFilter();
+        JwtTokenProvider jwtProvider = new JwtTokenProvider(config.getJwtSecret(), config.getJwtValidityMs());
+        PasswordEncoderUtil passwordEncoder = new PasswordEncoderUtil();
+        UserRepository userRepository = new UserRepository();
+        TurnTimerService timerService = new TurnTimerService(
+                Executors.newScheduledThreadPool(2, r -> {
+                    Thread t = new Thread(r, "test-sell-timer");
+                    t.setDaemon(true);
+                    return t;
+                }), 30);
+        RoomManagerService roomManager = new RoomManagerService(timerService);
+        ApiGatewayServer server = new ApiGatewayServer(
+                config, originFilter, jwtProvider, userRepository,
+                roomManager,
+                new AuthRestController(userRepository, passwordEncoder, jwtProvider),
+                new RoomRestController(roomManager),
+                new GameWebSocketController());
+        server.start();
+        int port = server.getPort();
+        try {
+            AuthUser p1 = registerViaRest(port, "f_stomp1", "Pass1234!", "Sell1");
+            AuthUser p2 = registerViaRest(port, "f_stomp2", "Pass1234!", "Sell2");
+            Map<String, String> h1 = Map.of("Authorization", "Bearer " + p1.token);
+            Map<String, String> h2 = Map.of("Authorization", "Bearer " + p2.token);
+
+            String roomId = (String) MiniJson.parseObject((String) MiniJson.parseObject(
+                    RawHttpClient.request("127.0.0.1", port, "POST", "/api/v1/rooms", h1,
+                            "{\"roomName\":\"Sell Room\",\"maxPlayers\":2}").body).get("payload")).get("roomId");
+            RawHttpClient.request("127.0.0.1", port, "POST", "/api/v1/rooms/" + roomId + "/join", h2, "{}");
+            RawHttpClient.request("127.0.0.1", port, "POST", "/api/v1/rooms/" + roomId + "/start", h1, "{}");
+
+            GameRoom room = roomManager.getRoom(roomId);
+            Player player1 = room.getPlayers().stream().filter(p -> p1.userId.equals(p.getId())).findFirst().orElseThrow();
+            Player player2 = room.getPlayers().stream().filter(p -> p2.userId.equals(p.getId())).findFirst().orElseThrow();
+            StreetProperty tile1 = (StreetProperty) room.getBoard().getTile(1);
+            player1.buyProperty(tile1);
+            player1.deductMoney(player1.getMoney());
+            player1.addMoney(10_000);
+            StreetProperty tile3 = (StreetProperty) room.getBoard().getTile(3);
+            player2.buyProperty(tile3);
+            tile3.setHouseCount(1);
+            room.setForcedDiceValue(3);
+
+            String topicDest = "/topic/room/" + roomId;
+            try (StompWsClient c1 = new StompWsClient("127.0.0.1", port, "/ws", null)) {
+                c1.connectAndExpectFrame("Bearer " + p1.token, 4000);
+                c1.subscribe("sub-1", topicDest);
+                Map<String, Object> initSnap = awaitGameSnapshot(c1, topicDest, 4000);
+                assertTrue(initSnap.containsKey("upgradeTileIndex"), "Snapshot has upgradeTileIndex");
+                assertTrue(initSnap.containsKey("upgradedThisTurn"), "Snapshot has upgradedThisTurn");
+                assertTrue(initSnap.containsKey("forcedDiceValue"), "Snapshot has forcedDiceValue");
+
+                c1.send("/app/room/" + roomId + "/roll-dice", "{\"turnId\":" + room.getTurnId() + "}");
+                Map<String, Object> debtSnap = awaitGameSnapshot(c1, topicDest, 4000);
+                assertEquals("AWAITING_DEBT_SETTLEMENT", debtSnap.get("phase"), "Phase is AWAITING_DEBT_SETTLEMENT");
+
+                c1.send("/app/room/" + roomId + "/sell-property",
+                        "{\"turnId\":" + room.getTurnId() + ",\"tileIndex\":1}");
+                Map<String, Object> soldMsg = awaitTopicMessageOfType(c1, topicDest, "PROPERTY_SOLD", 4000);
+                assertNotNull(soldMsg, "PROPERTY_SOLD STOMP broadcast received");
+            }
+        } finally {
+            server.stop();
+            roomManager.shutdown();
+        }
+    }
+
+    private void testSuiteF_RentPaidAndTaxPaidStompBroadcasts() throws Exception {
+        GatewayConfig config = new GatewayConfig(0, "dev", null, TEST_JWT_SECRET, 3600_000L);
+        CloudflareOriginFilter originFilter = config.createOriginFilter();
+        JwtTokenProvider jwtProvider = new JwtTokenProvider(config.getJwtSecret(), config.getJwtValidityMs());
+        PasswordEncoderUtil passwordEncoder = new PasswordEncoderUtil();
+        UserRepository userRepository = new UserRepository();
+        TurnTimerService timerService = new TurnTimerService(
+                Executors.newScheduledThreadPool(2, r -> {
+                    Thread t = new Thread(r, "test-bc-timer");
+                    t.setDaemon(true);
+                    return t;
+                }), 30);
+        RoomManagerService roomManager = new RoomManagerService(timerService);
+        ApiGatewayServer server = new ApiGatewayServer(
+                config, originFilter, jwtProvider, userRepository,
+                roomManager,
+                new AuthRestController(userRepository, passwordEncoder, jwtProvider),
+                new RoomRestController(roomManager),
+                new GameWebSocketController());
+        server.start();
+        int port = server.getPort();
+        try {
+            AuthUser p1 = registerViaRest(port, "f_bc1", "Pass1234!", "BC1");
+            AuthUser p2 = registerViaRest(port, "f_bc2", "Pass1234!", "BC2");
+            Map<String, String> h1 = Map.of("Authorization", "Bearer " + p1.token);
+            Map<String, String> h2 = Map.of("Authorization", "Bearer " + p2.token);
+
+            String roomId = (String) MiniJson.parseObject((String) MiniJson.parseObject(
+                    RawHttpClient.request("127.0.0.1", port, "POST", "/api/v1/rooms", h1,
+                            "{\"roomName\":\"Broadcast Room\",\"maxPlayers\":2}").body).get("payload")).get("roomId");
+            RawHttpClient.request("127.0.0.1", port, "POST", "/api/v1/rooms/" + roomId + "/join", h2, "{}");
+            RawHttpClient.request("127.0.0.1", port, "POST", "/api/v1/rooms/" + roomId + "/start", h1, "{}");
+
+            GameRoom room = roomManager.getRoom(roomId);
+            Player player2 = room.getPlayers().stream().filter(p -> p2.userId.equals(p.getId())).findFirst().orElseThrow();
+            player2.buyProperty((StreetProperty) room.getBoard().getTile(3));
+
+            String topicDest = "/topic/room/" + roomId;
+            try (StompWsClient c1 = new StompWsClient("127.0.0.1", port, "/ws", null)) {
+                c1.connectAndExpectFrame("Bearer " + p1.token, 4000);
+                c1.subscribe("sub-1", topicDest);
+                awaitGameSnapshot(c1, topicDest, 4000);
+
+                room.setForcedDiceValue(3);
+                c1.send("/app/room/" + roomId + "/roll-dice", "{\"turnId\":" + room.getTurnId() + "}");
+                assertNotNull(awaitTopicMessageOfType(c1, topicDest, "RENT_PAID", 4000), "RENT_PAID broadcast received");
+                c1.send("/app/room/" + roomId + "/end-turn", "{\"turnId\":" + room.getTurnId() + "}");
+                awaitTopicMessageOfType(c1, topicDest, "TURN_CHANGED", 4000);
+
+                room.setForcedDiceValue(4);
+                try (StompWsClient c2 = new StompWsClient("127.0.0.1", port, "/ws", null)) {
+                    c2.connectAndExpectFrame("Bearer " + p2.token, 4000);
+                    c2.send("/app/room/" + roomId + "/roll-dice", "{\"turnId\":" + room.getTurnId() + "}");
+                    assertNotNull(awaitTopicMessageOfType(c1, topicDest, "TAX_PAID", 4000), "TAX_PAID broadcast received");
+                }
+            }
+        } finally {
+            server.stop();
+            roomManager.shutdown();
+        }
+    }
+
+    private void testSuiteF_BotPacingDelay() {
+        String prev = System.getProperty("monopoly.botStepDelayMs");
+        System.setProperty("monopoly.botStepDelayMs", "300");
+        try {
+            GameRoom room = new GameRoom("suite-f-pace", "Pacing Room", 2);
+            Player bot = new Player("f-bot", "PacedBot", 1_500_000);
+            bot.setBot(true);
+            Player human = new Player("f-hum", "Human", 1_500_000);
+            room.addPlayer(bot);
+            room.addPlayer(human);
+            room.setStatus(RoomStatus.PLAYING);
+
+            GameEngine engine = new GameEngine(room);
+            room.setForcedDiceValue(6);
+            long t0 = System.currentTimeMillis();
+            BotController.processBotTurn(engine);
+            long elapsed = System.currentTimeMillis() - t0;
+            assertTrue(elapsed >= 600L, "Bot turn with botStepDelayMs=300 took >= 600ms (was " + elapsed + "ms)");
+        } finally {
+            if (prev == null) {
+                System.clearProperty("monopoly.botStepDelayMs");
+            } else {
+                System.setProperty("monopoly.botStepDelayMs", prev);
+            }
         }
     }
 
